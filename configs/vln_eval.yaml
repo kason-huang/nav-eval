@@ -1,0 +1,36 @@
+# VLN Evaluation Configuration
+
+# O3DE Simulator Configuration
+simulator:
+  mode: socket  # 'peb' or 'socket'
+  success_threshold: 0.2  # meters
+  collision_threshold: 0.3  # meters
+  linear_speed: 0.1  # m/s
+  angular_speed: 0.3  # rad/s
+
+  # Socket mode configuration (if mode='socket')
+  socket_host: 127.0.0.1
+  socket_port: 8080
+
+# VLM (Vision-Language Model) Configuration
+vlm:
+  url: ws://localhost:8080  # WebSocket server URL
+  use_pickle: true  # Use pickle for serialization (faster)
+
+  # Alternative: use ip/port format
+  # ip: 127.0.0.1
+  # port: 8080
+
+# Evaluation Configuration
+evaluation:
+  default_max_steps: 50
+  default_success_threshold: 0.2  # meters
+
+  # Output configuration
+  output_dir: results
+  save_trajectories: true
+
+# Logging Configuration
+logging:
+  level: INFO  # DEBUG, INFO, WARNING, ERROR
+  log_file: logs/vln_eval.log

@@ -1,0 +1,73 @@
+{
+  "episodes": [
+    {
+      "episode_id": "ep_001",
+      "scene_id": "scene_001",
+      "scene_config_path": "configs/scene_001.json",
+      "instruction": "Walk straight forward for 3 meters",
+      "start_position": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "start_rotation": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "goal_position": {
+        "x": 3.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "max_steps": 50,
+      "success_threshold": 0.2
+    },
+    {
+      "episode_id": "ep_002",
+      "scene_id": "scene_001",
+      "scene_config_path": "configs/scene_001.json",
+      "instruction": "Walk forward 2 meters, then turn left and walk 1 meter",
+      "start_position": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "start_rotation": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "goal_position": {
+        "x": 2.0,
+        "y": 0.0,
+        "z": 1.0
+      },
+      "max_steps": 50,
+      "success_threshold": 0.2
+    },
+    {
+      "episode_id": "ep_003",
+      "scene_id": "scene_001",
+      "scene_config_path": "configs/scene_001.json",
+      "instruction": "Turn right and walk 2 meters forward",
+      "start_position": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "start_rotation": {
+        "x": 0,
+        "y": 0,
+        "z": 0
+      },
+      "goal_position": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": -2.0
+      },
+      "max_steps": 50,
+      "success_threshold": 0.2
+    }
+  ]
+}
