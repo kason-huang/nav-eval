@@ -2,7 +2,7 @@
 """
 Test Script for VLN Evaluation System
 
-Uses Mock VLM Server and Mock O3DE Simulator to test the evaluation flow.
+Uses Mock Env and Mock Policy to test the evaluation flow.
 """
 
 import json
@@ -16,41 +16,46 @@ import numpy as np
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from vln_evaluator.dataset_loader import R2REpisode, R2RDatasetLoader
-from tests.mock_o3de_simulator import MockO3DESimulator, MockEpisode
-from vln_evaluator.ws_policy_client import WebSocketPolicyClient
+from vln_evaluator import (
+    VLNEvaluator, evaluate_vln,
+    MockEnv, O3DEEnv,
+    MockPolicy, WebSocketPolicy
+)
+from vln_evaluator.dataset_loader import R2RDatasetLoader, R2REpisode
 
 
-def test_mock_simulator_only():
-    """Test 1: Mock Simulator Only (No VLM)"""
+def test_mock_env_only():
+    """Test 1: MockEnv Only (No Policy)"""
     print("\n" + "="*70)
-    print("TEST 1: Mock O3DE Simulator (No VLM)")
+    print("TEST 1: MockEnv (No Policy)")
     print("="*70)
 
-    sim = MockO3DESimulator(success_threshold=0.2)
+    from vln_evaluator.env import Episode
+
+    env = MockEnv()
 
     # Create test episode
-    episode = MockEpisode(
+    episode = Episode(
         episode_id='test_001',
-        start_position={'x': 0, 'y': 0, 'z': 0},
-        goal_position={'x': 1.0, 'y': 0, 'z': 0},
+        scene_id='test_scene',
         instruction='Walk forward 1 meter',
+        start_position={'x': 0, 'y': 0, 'z': 0},
+        start_rotation={'x': 0, 'y': 0, 'z': 0},
+        goal_position={'x': 1.0, 'y': 0, 'z': 0},
         max_steps=10
     )
 
     # Reset
-    obs = sim.reset(episode)
+    obs = env.reset(episode)
     print(f"✓ Reset successful")
     print(f"  RGB shape: {obs['rgb'].shape}")
     print(f"  Depth shape: {obs['depth'].shape}")
 
     # Run steps with predefined actions
     actions = [1, 1, 1, 1, 0]  # Forward x4 then STOP
-    total_reward = 0
 
     for i, action in enumerate(actions):
-        obs, reward, done, info = sim.step(action)
-        total_reward += reward
+        obs, reward, done, info = env.step(action)
         print(f"  Step {i+1}: action={action}, dist={info['distance_to_goal']:.3f}m")
 
         if done:
@@ -58,72 +63,91 @@ def test_mock_simulator_only():
             print(f"  ✓ Episode done: success={success}")
             break
 
-    sim.close()
+    env.close()
     print("✓ Test 1 PASSED\n")
     return True
 
 
-def test_vlm_client_only():
-    """Test 2: VLM Client Only (Requires Mock Server)"""
+def test_mock_policy_only():
+    """Test 2: MockPolicy Only"""
     print("\n" + "="*70)
-    print("TEST 2: VLM Client (Mock Server Required)")
+    print("TEST 2: MockPolicy")
     print("="*70)
 
-    print("\nStarting Mock VLM Server...")
-    # Start mock server in background
-    server_process = subprocess.Popen(
-        [sys.executable, 'tests/mock_vlm_server.py', '--port', '8080'],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT  # Capture both to see server output
+    policy = MockPolicy()
+
+    # Test act() calls
+    rgb = np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8)
+    depth = np.random.randint(0, 10000, (64, 64), dtype=np.uint16)
+    obs = {
+        'rgb': rgb,
+        'depth': depth,
+        'instruction': 'Walk forward 2 meters'
+    }
+
+    print("\nCalling MockPolicy.act() 5 times...")
+    action_names = ['STOP', 'FORWARD', 'LEFT', 'RIGHT']
+
+    for i in range(5):
+        action = policy.act(obs)
+        print(f"  Call {i+1}: action = {action} ({action_names[action]})")
+
+    print("✓ Test 2 PASSED\n")
+    return True
+
+
+def test_vln_evaluator_with_mocks():
+    """Test 3: VLNEvaluator with MockEnv and MockPolicy"""
+    print("\n" + "="*70)
+    print("TEST 3: VLNEvaluator (MockEnv + MockPolicy)")
+    print("="*70)
+
+    # Create Env and Policy
+    env = MockEnv()
+    policy = MockPolicy()
+
+    # Create VLNEvaluator
+    evaluator = VLNEvaluator(env=env, policy=policy,
+                             default_max_steps=20,
+                             default_success_threshold=0.3)
+
+    print("✓ VLNEvaluator initialized with Mock components")
+
+    # Create test episode
+    episode = R2REpisode(
+        episode_id='test_001',
+        scene_id='test_scene',
+        instruction='Walk forward 2 meters',
+        start_position={'x': 0, 'y': 0, 'z': 0},
+        start_rotation={'x': 0, 'y': 0, 'z': 0},
+        goal_position={'x': 2.0, 'y': 0, 'z': 0},
+        max_steps=20
     )
 
-    # Wait for server to start
-    time.sleep(3)
+    print(f"\n--- Evaluating {episode.episode_id} ---")
+    print(f"Instruction: {episode.instruction}")
 
-    try:
-        # Create VLM client
-        client = WebSocketPolicyClient(url='ws://localhost:8080')
-        client.connect()
-        print("✓ Connected to Mock VLM Server")
+    # Evaluate episode
+    result = evaluator.evaluate_episode(episode)
 
-        # Test act() calls
-        rgb = np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8)
-        depth = np.random.randint(0, 10000, (64, 64), dtype=np.uint16)
-        instruction = "Walk forward 2 meters"
+    print(f"\nResult:")
+    print(f"  Success: {result.success}")
+    print(f"  Failure Reason: {result.failure_reason}")
+    print(f"  Final Distance: {result.final_distance_to_goal:.3f}m")
+    print(f"  Steps: {result.steps}")
+    print(f"  Collision Count: {result.collision_count}")
+    print(f"  Trajectory Points: {len(result.trajectory)}")
 
-        print("\nSending 5 test observations...")
-        for i in range(5):
-            try:
-                action = client.act(rgb, depth, instruction)
-                action_names = ['STOP', 'FORWARD', 'LEFT', 'RIGHT']
-                print(f"  Step {i+1}: Received action = {action} ({action_names[action]})")
-            except Exception as act_error:
-                print(f"  Step {i+1}: Error getting action: {act_error}")
-                raise
+    evaluator.close()
 
-        client.disconnect()
-        print("✓ Test 2 PASSED\n")
-        return True
-
-    except Exception as e:
-        print(f"✗ Test 2 FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-        print()
-        return False
-    finally:
-        # Stop server
-        server_process.terminate()
-        try:
-            server_process.wait(timeout=5)
-        except:
-            server_process.kill()
+    print("\n✓ Test 3 PASSED\n")
+    return True
 
 
-def test_full_evaluation_mock():
-    """Test 3: Full Evaluation with Mock Simulator and VLM"""
+def test_vln_evaluator_with_websocket():
+    """Test 4: VLNEvaluator with MockEnv and WebSocketPolicy"""
     print("\n" + "="*70)
-    print("TEST 3: Full Evaluation (Mock Simulator + Mock VLM)")
+    print("TEST 4: VLNEvaluator (MockEnv + WebSocketPolicy)")
     print("="*70)
 
     print("\nStarting Mock VLM Server in smart mode...")
@@ -136,94 +160,161 @@ def test_full_evaluation_mock():
     time.sleep(2)
 
     try:
-        # Create simulator and VLM client
-        sim = MockO3DESimulator(success_threshold=0.3)
-        vlm_client = WebSocketPolicyClient(url='ws://localhost:8081')
-        vlm_client.connect()
+        # Create Env and Policy
+        env = MockEnv()
+        policy = WebSocketPolicy('localhost', '8081')
 
-        print("✓ Mock components initialized")
+        # Create VLNEvaluator
+        evaluator = VLNEvaluator(env=env, policy=policy,
+                                 default_max_steps=20,
+                                 default_success_threshold=0.3)
+
+        print("✓ VLNEvaluator initialized with MockEnv + WebSocketPolicy")
 
         # Create test episodes
         episodes = [
-            MockEpisode(
+            R2REpisode(
                 episode_id='test_001',
-                start_position={'x': 0, 'y': 0, 'z': 0},
-                goal_position={'x': 2.0, 'y': 0, 'z': 0},
+                scene_id='test_scene',
                 instruction='Walk forward 2 meters',
+                start_position={'x': 0, 'y': 0, 'z': 0},
+                start_rotation={'x': 0, 'y': 0, 'z': 0},
+                goal_position={'x': 2.0, 'y': 0, 'z': 0},
                 max_steps=20
             ),
-            MockEpisode(
+            R2REpisode(
                 episode_id='test_002',
+                scene_id='test_scene',
+                instruction='Walk forward 1.5 meters',
                 start_position={'x': 0, 'y': 0, 'z': 0},
-                goal_position={'x': 1.0, 'y': 0, 'z': 1.0},
-                instruction='Walk forward and turn left',
+                start_rotation={'x': 0, 'y': 0, 'z': 0},
+                goal_position={'x': 1.5, 'y': 0, 'z': 0},
                 max_steps=20
             )
         ]
 
         results = []
 
-        # Run evaluation
+        # Evaluate episodes
         for ep in episodes:
             print(f"\n--- Evaluating {ep.episode_id} ---")
             print(f"Instruction: {ep.instruction}")
 
-            # Reset
-            obs = sim.reset(ep)
+            result = evaluator.evaluate_episode(ep)
+            results.append(result)
 
-            # Episode loop
-            success = False
-            for step in range(ep.max_steps):
-                # Get action from VLM
-                action = vlm_client.act(obs['rgb'], obs['depth'], ep.instruction)
-
-                # Execute
-                obs, reward, done, info = sim.step(action)
-
-                if done:
-                    success = info['distance_to_goal'] < sim.success_threshold
-                    print(f"  Episode done: success={success}, dist={info['distance_to_goal']:.3f}m")
-                    break
-
-            results.append({
-                'episode_id': ep.episode_id,
-                'success': success,
-                'steps': info['step'],
-                'distance': info['distance_to_goal']
-            })
+            print(f"  Success: {result.success}")
+            print(f"  Distance: {result.final_distance_to_goal:.3f}m")
+            print(f"  Steps: {result.steps}")
 
         # Print summary
         print("\n" + "-"*70)
         print("EVALUATION SUMMARY")
         print("-"*70)
-        success_count = sum(1 for r in results if r['success'])
+        success_count = sum(1 for r in results if r.success)
         print(f"Total episodes: {len(results)}")
         print(f"Success count: {success_count}")
         print(f"Success rate: {success_count/len(results):.2%}")
-        print("\nPer-episode results:")
-        for r in results:
-            print(f"  {r['episode_id']}: success={r['success']}, steps={r['steps']}, dist={r['distance']:.3f}m")
 
-        sim.close()
-        vlm_client.disconnect()
+        evaluator.close()
 
-        print("✓ Test 3 PASSED\n")
+        print("\n✓ Test 4 PASSED\n")
         return True
 
     except Exception as e:
-        print(f"✗ Test 3 FAILED: {e}")
+        print(f"✗ Test 4 FAILED: {e}")
         import traceback
         traceback.print_exc()
         return False
     finally:
         server_process.terminate()
-        server_process.wait()
+        try:
+            server_process.wait(timeout=5)
+        except:
+            server_process.kill()
+
+
+def test_evaluate_dataset():
+    """Test 5: evaluate_dataset() with mock components"""
+    print("\n" + "="*70)
+    print("TEST 5: evaluate_dataset() with Mock Components")
+    print("="*70)
+
+    # Create test dataset
+    test_episodes = [
+        R2REpisode(
+            episode_id='test_001',
+            scene_id='test_scene',
+            instruction='Walk forward 1 meter',
+            start_position={'x': 0, 'y': 0, 'z': 0},
+            start_rotation={'x': 0, 'y': 0, 'z': 0},
+            goal_position={'x': 1.0, 'y': 0, 'z': 0},
+            max_steps=15
+        ),
+        R2REpisode(
+            episode_id='test_002',
+            scene_id='test_scene',
+            instruction='Walk forward 1.5 meters',
+            start_position={'x': 0, 'y': 0, 'z': 0},
+            start_rotation={'x': 0, 'y': 0, 'z': 0},
+            goal_position={'x': 1.5, 'y': 0, 'z': 0},
+            max_steps=20
+        ),
+        R2REpisode(
+            episode_id='test_003',
+            scene_id='test_scene',
+            instruction='Walk forward 2 meters',
+            start_position={'x': 0, 'y': 0, 'z': 0},
+            start_rotation={'x': 0, 'y': 0, 'z': 0},
+            goal_position={'x': 2.0, 'y': 0, 'z': 0},
+            max_steps=25
+        )
+    ]
+
+    # Save to file
+    test_dataset_path = 'tests/test_dataset.json'
+    R2RDatasetLoader.save_to_file(test_episodes, test_dataset_path)
+    print(f"✓ Created test dataset: {test_dataset_path}")
+
+    # Create evaluator with mocks
+    env = MockEnv()
+    policy = MockPolicy()
+
+    with VLNEvaluator(env=env, policy=policy) as evaluator:
+        print("✓ VLNEvaluator initialized")
+
+        # Evaluate dataset
+        results = evaluator.evaluate_dataset(test_dataset_path)
+
+        # Print summary
+        print("\n" + "-"*70)
+        print("DATASET EVALUATION RESULTS")
+        print("-"*70)
+        print(f"Total episodes: {results.total_episodes}")
+        print(f"Success count: {results.success_count}")
+        print(f"Success rate: {results.success_rate:.2%}")
+        print(f"Avg distance error: {results.avg_distance_error:.3f}m")
+        print(f"Avg steps: {results.avg_steps:.1f}")
+
+        print("\nPer-episode results:")
+        for ep in results.episodes:
+            status = "✓" if ep.success else "✗"
+            print(f"  {status} {ep.episode_id}: success={ep.success}, "
+                  f"steps={ep.steps}, dist={ep.final_distance_to_goal:.3f}m")
+
+    # Cleanup
+    if os.path.exists(test_dataset_path):
+        os.remove(test_dataset_path)
+        print(f"\n✓ Cleaned up test dataset")
+
+    print("\n✓ Test 5 PASSED\n")
+    return True
 
 
 def test_dataset_loader():
-    """Test 4: Dataset Loader"""
+    """Test 6: Dataset Loader"""
     print("\n" + "="*70)
-    print("TEST 4: R2R Dataset Loader")
+    print("TEST 6: R2R Dataset Loader")
     print("="*70)
 
     # Create test dataset
@@ -269,7 +360,7 @@ def test_dataset_loader():
         os.remove(test_dataset_path)
         print(f"✓ Cleaned up test dataset")
 
-    print("✓ Test 4 PASSED\n")
+    print("✓ Test 6 PASSED\n")
     return True
 
 
@@ -278,24 +369,28 @@ def main():
     print("\n" + "="*70)
     print("VLN EVALUATION SYSTEM - TEST SUITE")
     print("="*70)
-    print("\nThis test suite uses Mock components to verify the evaluation flow")
-    print("without requiring actual O3DE or VLM server.\n")
-
-    import numpy as np  # For test data generation
+    print("\nThis test suite uses Mock Env and Mock Policy to verify")
+    print("the evaluation flow without requiring actual O3DE or VLM server.\n")
 
     results = {}
 
-    # Test 1: Mock Simulator Only
-    results['test1'] = test_mock_simulator_only()
+    # Test 1: MockEnv Only
+    results['test1'] = test_mock_env_only()
 
-    # Test 2: VLM Client Only (with mock server)
-    results['test2'] = test_vlm_client_only()
+    # Test 2: MockPolicy Only
+    results['test2'] = test_mock_policy_only()
 
-    # Test 3: Full Evaluation
-    results['test3'] = test_full_evaluation_mock()
+    # Test 3: VLNEvaluator with Mocks
+    results['test3'] = test_vln_evaluator_with_mocks()
 
-    # Test 4: Dataset Loader
-    results['test4'] = test_dataset_loader()
+    # Test 4: VLNEvaluator with WebSocket
+    results['test4'] = test_vln_evaluator_with_websocket()
+
+    # Test 5: evaluate_dataset()
+    results['test5'] = test_evaluate_dataset()
+
+    # Test 6: Dataset Loader
+    results['test6'] = test_dataset_loader()
 
     # Print summary
     print("\n" + "="*70)

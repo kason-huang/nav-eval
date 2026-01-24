@@ -389,7 +389,6 @@ class O3DEAgentManager:
 
         builder = BasicSceneBuilder(scene_info, self.agent)
         builder.build_scene()
-        self.agent.general.wait_for_propagation()
         self.scene_loaded = True
 
     def create_robot(self, name: str = 'robot', asset_path: str = None,
@@ -407,14 +406,11 @@ class O3DEAgentManager:
         pos = dict_to_vector3(position or {'x': 0, 'y': 0, 'z': 0})
         self.robot_entity_id = self.agent.editor_tool.create_new_entity_at_position(pos, name)
 
-        self.agent.general.wait_for_propagation()
-
         # Set rotation if provided
         if rotation:
             quat = euler_to_quaternion(rotation)
             self.agent.tc.set_world_rotation(self.robot_entity_id, quat)
 
-        self.agent.general.wait_for_propagation()
 
     def set_robot_position(self, position: Dict[str, float], rotation: Dict[str, float] = None):
         """
@@ -434,7 +430,6 @@ class O3DEAgentManager:
             quat = euler_to_quaternion(rotation)
             self.agent.tc.set_world_rotation(self.robot_entity_id, quat)
 
-        self.agent.general.wait_for_propagation()
 
     def get_robot_position(self) -> Optional[Dict[str, float]]:
         """

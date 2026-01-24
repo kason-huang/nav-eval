@@ -3,7 +3,8 @@
     "allow": [
       "Bash(source:*)",
       "Bash(conda activate:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(python3:*)"
     ]
   }
 }

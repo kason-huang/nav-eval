@@ -2,24 +2,21 @@
 """
 VLN Evaluator - Main Evaluation Module
 
-Orchestrates VLN evaluation using O3DE simulator and remote VLM.
+Orchestrates VLN evaluation using Env and Policy.
 """
 
 import json
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Callable
-from datetime import datetime
+from typing import List, Dict, Any, Optional, TYPE_CHECKING, Callable
+
 import numpy as np
 
-# Import simulator and related modules
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from o3de_simulator import O3DESimulator, Episode
+from vln_evaluator.env import Env, Episode
 from vln_evaluator.dataset_loader import R2RDatasetLoader, R2REpisode
-from vln_evaluator.ws_policy_client import WebSocketPolicyClient
+
+if TYPE_CHECKING:
+    from vln_evaluator.policy import Policy
 
 
 @dataclass
@@ -82,35 +79,29 @@ class VLNEvaluator:
     VLN Evaluator - Main evaluation orchestration
 
     Coordinates between:
-    - O3DE Simulator (environment)
-    - Remote VLM (policy)
-    - Dataset (episodes)
+    - Env: Environment (contains Simulator internally)
+    - Policy: Action selection (local or remote VLM)
+    - Dataset: Episodes to evaluate
     """
 
     def __init__(self,
-                 simulator_config: Optional[Dict[str, Any]] = None,
-                 vlm_config: Optional[Dict[str, Any]] = None,
+                 env: Env,
+                 policy: 'Policy',
                  default_max_steps: int = 50,
                  default_success_threshold: float = 0.2):
         """
         Initialize VLN Evaluator
 
         Args:
-            simulator_config: O3DE simulator configuration
-            vlm_config: VLM WebSocket client configuration
+            env: Environment instance (e.g., O3DEEnv, MockEnv)
+            policy: Policy instance (e.g., WebSocketPolicy, MockPolicy)
             default_max_steps: Default max steps per episode
             default_success_threshold: Default success distance threshold (meters)
         """
-        self.simulator_config = simulator_config or {}
-        self.vlm_config = vlm_config or {}
+        self.env = env
+        self.policy = policy
         self.default_max_steps = default_max_steps
         self.default_success_threshold = default_success_threshold
-
-        # Initialize simulator
-        self.simulator = O3DESimulator(**self.simulator_config)
-
-        # Initialize VLM client
-        self.vlm_client = WebSocketPolicyClient(**self.vlm_config)
 
     def evaluate_dataset(self,
                         dataset_path: str,
@@ -138,10 +129,6 @@ class VLNEvaluator:
             r2r_episodes = [ep for ep in r2r_episodes if ep.episode_id in episode_id_set]
             print(f'Filtered to {len(r2r_episodes)} episodes')
 
-        # Connect to VLM
-        print(f'Connecting to VLM server: {self.vlm_config.get("url", "ws://localhost:8080")}')
-        self.vlm_client.connect()
-
         # Evaluate each episode
         results = EvaluationResult()
 
@@ -160,9 +147,6 @@ class VLNEvaluator:
                 print(f'  ✓ SUCCESS - Distance: {ep_result.final_distance_to_goal:.3f}m, Steps: {ep_result.steps}')
             else:
                 print(f'  ✗ FAILED - Reason: {ep_result.failure_reason}, Distance: {ep_result.final_distance_to_goal:.3f}m')
-
-        # Disconnect from VLM
-        self.vlm_client.disconnect()
 
         # Compute statistics
         results.total_episodes = len(results.episodes)
@@ -185,7 +169,7 @@ class VLNEvaluator:
         Returns:
             EpisodeResult
         """
-        # Convert R2REpisode to Episode for simulator
+        # Convert R2REpisode to Episode for env
         max_steps = r2r_ep.max_steps or self.default_max_steps
         success_threshold = r2r_ep.success_threshold or self.default_success_threshold
 
@@ -201,11 +185,11 @@ class VLNEvaluator:
             success_threshold=success_threshold
         )
 
-        # Reset simulator
+        # Reset environment
         try:
-            obs = self.simulator.reset(episode)
+            obs = self.env.reset(episode)
         except Exception as e:
-            print(f'  Error resetting simulator: {e}')
+            print(f'  Error resetting environment: {e}')
             return EpisodeResult(
                 episode_id=r2r_ep.episode_id,
                 scene_id=r2r_ep.scene_id,
@@ -215,27 +199,35 @@ class VLNEvaluator:
                 steps=0
             )
 
+        # Add instruction to observation for VLM policies
+        obs['instruction'] = r2r_ep.instruction
+
         # Evaluation loop
         success = False
         failure_reason = None
         collision_count = 0
+        trajectory = []
+        final_distance = float('inf')
 
         for step in range(max_steps):
             try:
-                # Get action from VLM
-                rgb = obs['rgb']
-                depth = obs['depth']
-                action = self.vlm_client.act(rgb, depth, r2r_ep.instruction)
+                # Get action from policy
+                action = self.policy.act(obs)
 
-                # Execute action
-                obs, reward, done, info = self.simulator.step(action)
+                # Execute action through env
+                obs, reward, done, info = self.env.step(action)
 
-                # Update info
+                # Re-add instruction to observation for next step
+                obs['instruction'] = r2r_ep.instruction
+
+                # Extract info from step return
                 collision_count = info.get('collision_count', 0)
+                trajectory = info.get('trajectory', [])
+                final_distance = info.get('distance_to_goal', float('inf'))
 
                 # Check if done
                 if done:
-                    success = (info['distance_to_goal'] < success_threshold)
+                    success = (final_distance < success_threshold)
                     if not success:
                         failure_reason = 'timeout'
                     break
@@ -244,10 +236,6 @@ class VLNEvaluator:
                 print(f'  Error during evaluation: {e}')
                 failure_reason = f'execution_error: {str(e)}'
                 break
-
-        # Get final state
-        final_distance = self.simulator.get_distance_to_goal()
-        trajectory = self.simulator.get_trajectory()
 
         return EpisodeResult(
             episode_id=r2r_ep.episode_id,
@@ -279,7 +267,7 @@ class VLNEvaluator:
 
     def close(self):
         """Close evaluator and cleanup"""
-        self.simulator.close()
+        self.env.close()
 
     def __enter__(self):
         """Context manager entry"""
@@ -296,8 +284,8 @@ class VLNEvaluator:
 
 def evaluate_vln(dataset_path: str,
                 output_path: str,
-                simulator_config: Optional[Dict[str, Any]] = None,
-                vlm_config: Optional[Dict[str, Any]] = None,
+                env: Env,
+                policy: 'Policy',
                 episode_ids: Optional[List[str]] = None):
     """
     Convenience function to run VLN evaluation
@@ -305,17 +293,14 @@ def evaluate_vln(dataset_path: str,
     Args:
         dataset_path: Path to R2R dataset JSON
         output_path: Path to save results JSON
-        simulator_config: O3DE simulator config
-        vlm_config: VLM WebSocket client config
+        env: Environment instance (e.g., O3DEEnv, MockEnv)
+        policy: Policy instance (e.g., WebSocketPolicy, MockPolicy)
         episode_ids: Optional list of episode IDs to evaluate
 
     Returns:
         EvaluationResult
     """
-    vlm_config = vlm_config or {}
-    simulator_config = simulator_config or {}
-
-    with VLNEvaluator(simulator_config=simulator_config, vlm_config=vlm_config) as evaluator:
+    with VLNEvaluator(env=env, policy=policy) as evaluator:
         # Progress callback
         def progress_callback(current, total):
             print(f'\n=== Progress: {current}/{total} episodes ===')
@@ -350,15 +335,22 @@ if __name__ == '__main__':
     print('')
     print('Usage:')
     print('  from vln_evaluator import VLNEvaluator, evaluate_vln')
+    print('  from vln_evaluator.env import MockEnv, O3DEEnv')
+    print('  from vln_evaluator.policy import MockPolicy, WebSocketPolicy')
     print('')
     print('  # Option 1: Use convenience function')
+    print('  env = MockEnv()')
+    print('  policy = MockPolicy()')
     print('  evaluate_vln(')
     print('      dataset_path="datasets/sample_r2r.json",')
     print('      output_path="results/eval_results.json",')
-    print('      vlm_config={"url": "ws://localhost:8080"}')
+    print('      env=env,')
+    print('      policy=policy')
     print('  )')
     print('')
     print('  # Option 2: Use evaluator class')
-    print('  with VLNEvaluator() as evaluator:')
+    print('  env = O3DEEnv(simulator_config={"mode": "socket"})')
+    print('  policy = WebSocketPolicy("localhost", "8080")')
+    print('  with VLNEvaluator(env=env, policy=policy) as evaluator:')
     print('      results = evaluator.evaluate_dataset("datasets/sample_r2r.json")')
     print('      evaluator.save_results(results, "results/eval_results.json")')

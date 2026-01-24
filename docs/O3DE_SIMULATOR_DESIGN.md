@@ -19,16 +19,27 @@
 import abc
 
 class Env(abc.ABC):
-    """仿真器抽象基类"""
+    """环境抽象基类，遵循Habitat-lab约定"""
 
     @abc.abstractmethod
-    def reset(self, task):
-        """重置环境"""
+    def reset(self, episode: Episode) -> Dict[str, np.ndarray]:
+        """重置环境
+
+        Returns:
+            obs: {'rgb': ndarray, 'depth': ndarray}
+        """
         pass
 
     @abc.abstractmethod
-    def step(self, action):
-        """执行一步"""
+    def step(self, action: int) -> Tuple[obs, reward, done, info]:
+        """执行一步
+
+        Returns:
+            obs: {'rgb': ndarray, 'depth': ndarray}
+            reward: float (0.0 for VLN)
+            done: bool
+            info: dict with position, distance_to_goal, collision_count, trajectory
+        """
         pass
 
     @abc.abstractmethod
@@ -36,6 +47,16 @@ class Env(abc.ABC):
         """关闭环境"""
         pass
 ```
+
+**Env继承层次结构**:
+```
+Env (abc.ABC)
+  ├── MockEnv - 用于测试，无O3DE/ROS2依赖
+  └── O3DEEnv - 生产环境，封装O3DESimulator
+       └── (内部) O3DESimulator - 实际的O3DE仿真器实现
+```
+
+**注意**: O3DESimulator是内部实现，不直接暴露给VLNEvaluator。VLNEvaluator通过Env接口访问环境。
 
 ### 3.2 O3DE Simulator接口
 
@@ -488,7 +509,53 @@ O3DE_SIMULATOR_CONFIG = {
 
 ## 九、使用示例
 
-### 9.1 基本使用
+### 9.1 通过Env接口使用（推荐）
+
+**使用O3DEEnv进行评测**:
+```python
+from vln_evaluator.env import O3DEEnv
+from vln_evaluator.policy import MockPolicy
+from vln_evaluator import VLNEvaluator
+
+# 创建环境（封装O3DESimulator）
+env = O3DEEnv(simulator_config={'mode': 'socket'})
+
+# 创建策略
+policy = MockPolicy()
+
+# 创建评测器
+evaluator = VLNEvaluator(env=env, policy=policy)
+
+# 评测数据集
+results = evaluator.evaluate_dataset('datasets/sample_r2r.json')
+
+# 保存结果
+evaluator.save_results(results, 'results/eval.json')
+
+# 清理
+evaluator.close()
+```
+
+**使用上下文管理器**:
+```python
+from vln_evaluator.env import O3DEEnv
+from vln_evaluator.policy import WebSocketPolicy
+from vln_evaluator import VLNEvaluator
+
+env = O3DEEnv(simulator_config={
+    'mode': 'socket',
+    'success_threshold': 0.2
+})
+policy = WebSocketPolicy('localhost', '8080')
+
+with VLNEvaluator(env=env, policy=policy) as evaluator:
+    results = evaluator.evaluate_dataset('datasets/sample_r2r.json')
+    evaluator.save_results(results, 'results/eval.json')
+```
+
+### 9.2 直接使用O3DESimulator（高级用法）
+
+**注意**: O3DESimulator是内部实现，通常通过O3DEEnv接口使用。直接使用适用于需要访问底层功能的场景。
 
 ```python
 from o3de_simulator import O3DESimulator
@@ -498,7 +565,7 @@ from o3de_sim import constants
 sim = O3DESimulator(mode=constants.O3DE_AGENT_SOCKET_MODE)
 
 # 创建episode
-episode = Episode(
+episode = sim.Episode(
     episode_id="ep_001",
     scene_id="scene_001",
     start_position={'x': 0, 'y': 0, 'z': 0},
@@ -526,48 +593,21 @@ for step in range(50):
 sim.close()
 ```
 
-### 9.2 评测循环
+### 9.3 使用MockEnv进行测试
 
 ```python
-def evaluate_vln(model, dataset, sim_config):
-    """VLN评测主循环"""
-    sim = O3DESimulator(**sim_config)
-    results = []
+from vln_evaluator.env import MockEnv
+from vln_evaluator.policy import MockPolicy
+from vln_evaluator import VLNEvaluator
 
-    for episode in dataset:
-        # 重置环境
-        obs = sim.reset(episode)
+# 创建mock环境（无需O3DE/ROS2）
+env = MockEnv()
+policy = MockPolicy()
 
-        # 评测episode
-        episode_result = {
-            'episode_id': episode.episode_id,
-            'success': False,
-            'steps': 0,
-            'trajectory': []
-        }
-
-        for step in range(episode.max_steps or 50):
-            # 模型推理
-            action = model.act(obs['rgb'], obs['depth'],
-                              episode.instruction)
-
-            # 执行动作
-            obs, reward, done, info = sim.step(action)
-
-            # 记录轨迹
-            episode_result['trajectory'].append(info['position'])
-
-            # 检查是否成功
-            if done and info['distance_to_goal'] < 0.2:
-                episode_result['success'] = True
-                episode_result['steps'] = step + 1
-                break
-
-        episode_result['final_distance'] = info['distance_to_goal']
-        results.append(episode_result)
-
-    sim.close()
-    return results
+# 创建评测器
+with VLNEvaluator(env=env, policy=policy) as evaluator:
+    results = evaluator.evaluate_dataset('datasets/sample_r2r.json')
+    print(f"Success rate: {results.success_rate:.2%}")
 ```
 
 ## 十、实现注意事项

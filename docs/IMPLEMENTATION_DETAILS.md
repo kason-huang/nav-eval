@@ -28,8 +28,9 @@ nav-eval/
 │
 ├── vln_evaluator/                     # VLN评测器模块包
 │   ├── __init__.py                    # 模块导出
+│   ├── env.py                         # Env接口（Env, MockEnv, O3DEEnv）
+│   ├── policy.py                      # Policy接口（Policy, MockPolicy, WebSocketPolicy）
 │   ├── dataset_loader.py              # R2R数据集加载器
-│   ├── ws_policy_client.py            # WebSocket VLM客户端
 │   └── vln_evaluator.py               # 主评测器
 │
 ├── o3de_sim/                          # O3DE仿真接口库（现有）
@@ -41,13 +42,8 @@ nav-eval/
 │   └── common/
 │       └── scene_builder/             # 场景构建器
 │
-├── o3de_simulator.py                  # O3DE仿真器（新增核心文件）
-├── action_executor.py                 # ROS2动作执行器（现有）
-├── policy.py                          # WebSocket Policy（现有）
-├── env.py                             # 抽象Env基类（现有）
-├── sim.py                             # 空占位符
-├── eval.py                            # Habitat评测（现有）
-│
+├── o3de_simulator.py                  # O3DE仿真器（内部实现，被O3DEEnv封装）
+├── action_executor.py                 # ROS2动作执行器（被O3DESimulator使用）
 ├── run_vln_eval.py                    # 评测运行脚本
 │
 ├── configs/
@@ -64,10 +60,11 @@ nav-eval/
 
 | 文件 | 行数（约） | 主要类/函数 | 作用 |
 |------|-----------|------------|------|
-| `o3de_simulator.py` | 550 | O3DESimulator, SensorSubscriber, ActionExecutorWrapper, O3DEAgentManager | O3DE仿真器核心实现 |
+| `vln_evaluator/env.py` | 210 | Env, MockEnv, O3DEEnv, Episode | 环境接口 |
+| `vln_evaluator/policy.py` | 60 | Policy, MockPolicy, WebSocketPolicy | 策略接口 |
+| `o3de_simulator.py` | 550 | O3DESimulator, SensorSubscriber, ActionExecutorWrapper | O3DE仿真器（内部） |
 | `vln_evaluator/dataset_loader.py` | 120 | R2RDatasetLoader, R2REpisode | 数据集加载 |
-| `vln_evaluator/ws_policy_client.py` | 150 | WebSocketPolicyClient | VLM通信客户端 |
-| `vln_evaluator/vln_evaluator.py` | 350 | VLNEvaluator, EpisodeResult, EvaluationResult | 评测流程编排 |
+| `vln_evaluator/vln_evaluator.py` | 360 | VLNEvaluator, EpisodeResult, EvaluationResult | 评测流程编排 |
 | `run_vln_eval.py` | 80 | main(), load_config() | 命令行入口 |
 | `configs/vln_eval.yaml` | 30 | - | 配置文件 |
 | `datasets/sample_r2r.json` | 80 | - | 示例数据 |
@@ -76,13 +73,89 @@ nav-eval/
 
 ## 二、核心模块实现
 
-### 2.1 o3de_simulator.py
+### 2.1 vln_evaluator/env.py
 
 #### 2.1.1 模块职责
 
-封装O3DE仿真环境，提供Habitat风格的Env接口。
+提供Env抽象接口，遵循Habitat-lab约定。封装仿真器内部实现。
 
 #### 2.1.2 核心类
+
+**Episode** - Episode数据类
+```python
+@dataclass
+class Episode:
+    episode_id: str
+    scene_id: str
+    instruction: str
+    start_position: Dict[str, float]
+    start_rotation: Dict[str, float]
+    goal_position: Dict[str, float]
+    scene_config_path: Optional[str] = None
+    max_steps: Optional[int] = None
+    success_threshold: Optional[float] = None
+```
+
+**Env** - 抽象环境接口
+```python
+class Env(abc.ABC):
+    def reset(self, episode: Episode) -> Dict[str, np.ndarray]
+    def step(self, action: int) -> Tuple[obs, reward, done, info]
+    def close(self)
+```
+
+**MockEnv** - Mock环境实现
+```python
+class MockEnv(Env):
+    def __init__(self)
+    def reset(self, episode: Episode) -> Dict[str, np.ndarray]
+    def step(self, action: int) -> Tuple[obs, reward, done, info]
+    def close(self)
+```
+
+**O3DEEnv** - O3DE环境实现
+```python
+class O3DEEnv(Env):
+    def __init__(self, simulator_config: Optional[Dict[str, Any]] = None)
+    def reset(self, episode: Episode) -> Dict[str, np.ndarray]
+    def step(self, action: int) -> Tuple[obs, reward, done, info]
+    def close(self)
+```
+
+### 2.2 vln_evaluator/policy.py
+
+#### 2.2.1 模块职责
+
+提供Policy抽象接口，处理动作选择。
+
+#### 2.2.2 核心类
+
+**Policy** - 抽象策略接口
+```python
+class Policy(abc.ABC):
+    def act(self, obs: Dict[str, Any]) -> int
+```
+
+**MockPolicy** - Mock策略（随机动作）
+```python
+class MockPolicy(Policy):
+    def act(self, obs: Dict[str, Any]) -> int
+```
+
+**WebSocketPolicy** - WebSocket VLM策略
+```python
+class WebSocketPolicy(Policy):
+    def __init__(self, ip: str, port: str)
+    def act(self, obs: Dict[str, Any]) -> int
+```
+
+### 2.3 o3de_simulator.py（内部实现）
+
+#### 2.3.1 模块职责
+
+封装O3DE仿真环境，提供Habitat风格的Env接口。
+
+#### 2.3.2 核心类
 
 **O3DESimulator** - 主仿真器类
 ```python
@@ -315,27 +388,83 @@ class EvaluationResult:
 
 ```python
 def evaluate_episode(self, r2r_ep: R2REpisode) -> EpisodeResult:
-    # 1. 转换为Simulator Episode
-    episode = Episode(...)
+    """
+    单episode评测流程 - 使用Env和Policy接口
+    """
+    # 1. 转换R2REpisode为Episode
+    episode = Episode(
+        episode_id=r2r_ep.episode_id,
+        scene_id=r2r_ep.scene_id,
+        start_position=r2r_ep.start_position,
+        start_rotation=r2r_ep.start_rotation,
+        goal_position=r2r_ep.goal_position,
+        instruction=r2r_ep.instruction,
+        max_steps=max_steps,
+        success_threshold=success_threshold
+    )
 
-    # 2. Reset simulator
-    obs = self.simulator.reset(episode)
+    # 2. Reset环境
+    obs = self.env.reset(episode)
 
-    # 3. Evaluation loop
+    # 3. 添加instruction到observation (VLN需要文本指令)
+    obs['instruction'] = r2r_ep.instruction
+
+    # 4. 评测循环
     for step in range(max_steps):
-        # 3.1 Get action from VLM
-        action = self.vlm_client.act(obs['rgb'], obs['depth'], instruction)
+        # 4.1 通过policy获取动作
+        action = self.policy.act(obs)
 
-        # 3.2 Execute action
-        obs, reward, done, info = self.simulator.step(action)
+        # 4.2 通过env执行动作
+        obs, reward, done, info = self.env.step(action)
 
-        # 3.3 Check if done
+        # 4.3 重新添加instruction到observation
+        obs['instruction'] = r2r_ep.instruction
+
+        # 4.4 检查是否完成
         if done:
-            success = (info['distance_to_goal'] < threshold)
+            success = (info['distance_to_goal'] < success_threshold)
             break
 
-    # 4. Return result
+    # 5. 返回结果
     return EpisodeResult(...)
+```
+
+#### 2.4.4 VLNEvaluator初始化
+
+```python
+class VLNEvaluator:
+    def __init__(self,
+                 env: Env,
+                 policy: Policy,
+                 default_max_steps: int = 50,
+                 default_success_threshold: float = 0.2):
+        self.env = env
+        self.policy = policy
+        self.default_max_steps = default_max_steps
+        self.default_success_threshold = default_success_threshold
+```
+
+#### 2.4.5 使用示例
+
+```python
+# 使用Mock组件进行测试
+from vln_evaluator import VLNEvaluator, MockEnv
+from vln_evaluator.policy import MockPolicy
+
+env = MockEnv()
+policy = MockPolicy()
+evaluator = VLNEvaluator(env, policy)
+results = evaluator.evaluate_dataset('datasets/sample_r2r.json')
+
+# 使用O3DE + WebSocket VLM
+from vln_evaluator.env import O3DEEnv
+from vln_evaluator.policy import WebSocketPolicy
+
+env = O3DEEnv(simulator_config={'mode': 'socket'})
+policy = WebSocketPolicy('localhost', '8080')
+with VLNEvaluator(env=env, policy=policy) as evaluator:
+    results = evaluator.evaluate_dataset('datasets/sample_r2r.json')
+    evaluator.save_results(results, 'results/eval.json')
 ```
 
 ---
@@ -365,44 +494,47 @@ def evaluate_episode(self, r2r_ep: R2REpisode) -> EpisodeResult:
                              ▼
         ┌────────────────────────────────────────┐
         │         VLN Evaluator                 │
-        │  ┌─────────────┐  ┌───────────────┐  │
-        │  │   VLM       │  │   Simulator   │  │
-        │  │   Client    │  │               │  │
-        │  └─────────────┘  └───────────────┘  │
-        │         │                 │          │
-        │         ▼                 ▼          │
-        │    ┌───────────────────────────┐     │
-        │    │    Evaluation Loop        │     │
-        │    │  ┌─────────────────────┐   │     │
-        │    │  │ 1. Get Observation  │◄──┼─────┼───── O3DE (RGB/Depth)
-        │    │  └─────────────────────┘   │     │
-        │    │           │                 │     │
-        │    │           ▼                 │     │
-        │    │  ┌─────────────────────┐   │     │
-        │    │  │ 2. Get VLM Action   │   │     │
-        │    │  └─────────────────────┘   │     │
-        │    │           │                 │     │
-        │    │           ▼                 │     │
-        │    │  ┌─────────────────────┐   │     │
-        │    │  │ 3. Execute Action   │───┼─────┼───── ROS2 (/cmd_vel)
-        │    │  └─────────────────────┘   │     │
-        │    │           │                 │     │
-        │    │           ▼                 │     │
-        │    │  ┌─────────────────────┐   │     │
-        │    │  │ 4. Query Pose       │◄──┼─────┼───── O3DE API
-        │    │  └─────────────────────┘   │     │
-        │    │           │                 │     │
-        │    │           ▼                 │     │
-        │    │  ┌─────────────────────┐   │     │
-        │    │  │ 5. Judge Success    │   │     │
-        │    │  └─────────────────────┘   │     │
-        │    │           │                 │     │
-        │    │           ▼                 │     │
-        │    │  ┌─────────────────────┐   │     │
-        │    │  │ 6. Record Result    │   │     │
-        │    │  └─────────────────────┘   │     │
-        │    └───────────────────────────┘     │
-        └────────────────────────────────────────┘
+        │  ┌─────────────┐     ┌───────────────┐  │
+        │  │    Env      │     │    Policy     │  │
+        │  │ (Interface) │     │  (Interface)  │  │
+        │  └─────────────┘     └───────────────┘  │
+        │         │                     │         │
+        │         ▼                     ▼         │
+        │    ┌──────────────────────────────┐    │
+        │    │    Evaluation Loop           │    │
+        │    │  ┌────────────────────────┐  │    │
+        │    │  │ obs = env.reset(ep)    │  │    │
+        │    │  │ obs['instruction'] =   │  │    │
+        │    │  │       ep.instruction    │  │    │
+        │    │  └────────────────────────┘  │    │
+        │    │           │                  │    │
+        │    │           ▼                  │    │
+        │    │  ┌────────────────────────┐  │    │
+        │    │  │ action =               │  │    │
+        │    │  │   policy.act(obs)      │  │    │
+        │    │  └────────────────────────┘  │    │
+        │    │           │                  │    │
+        │    │           ▼                  │    │
+        │    │  ┌────────────────────────┐  │    │
+        │    │  │ obs, reward, done,     │  │    │
+        │    │  │   info =               │  │    │
+        │    │  │   env.step(action)     │  │    │
+        │    │  └────────────────────────┘  │    │
+        │    │           │                  │    │
+        │    │           ▼                  │    │
+        │    │  ┌────────────────────────┐  │    │
+        │    │  │ obs['instruction'] =   │  │    │
+        │    │  │       ep.instruction    │  │    │
+        │    │  └────────────────────────┘  │    │
+        │    └──────────────────────────────┘    │
+        │         │                  │           │
+        └─────────┼──────────────────┼───────────┘
+                  │                  │
+                  ▼                  ▼
+        ┌─────────────────┐  ┌──────────────┐
+        │  O3DE Simulator │  │  Remote VLM  │
+        │  (内部实现)      │  │  Server      │
+        └─────────────────┘  └──────────────┘
                              │
                              ▼
                     ┌──────────────┐

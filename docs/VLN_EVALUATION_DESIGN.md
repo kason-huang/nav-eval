@@ -57,39 +57,43 @@ distance = euclidean_distance(current_pos, goal_position)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
+│                        VLNEvaluator                             │
+│  ┌──────────────────┐    ┌──────────────────┐                   │
+│  │ Dataset Loader   │    │  Result Manager  │                   │
+│  │ - R2R format     │    │ - JSON output    │                   │
+│  └──────────────────┘    └──────────────────┘                   │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │              Evaluation Loop                             │   │
+│  │  for episode in dataset:                                 │   │
+│  │    obs = env.reset(episode)                             │   │
+│  │    obs['instruction'] = episode.instruction              │   │
+│  │    while not done:                                       │   │
+│  │      action = policy.act(obs)                            │   │
+│  │      obs, reward, done, info = env.step(action)          │   │
+│  │      obs['instruction'] = episode.instruction            │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+         │                              │
+         ▼                              ▼
+┌─────────────────┐           ┌─────────────────┐
+│      Env        │           │     Policy      │
+│  (Environment   │           │  (Action        │
+│   Interface)    │           │   Selection)    │
+│  ┌────────────┐ │           │  ┌────────────┐ │
+│  │ MockEnv    │ │           │  │ MockPolicy │ │
+│  │ O3DEEnv    │ │           │  │ WebSocket  │ │
+│  │   └──O3DE  │ │           │  │   Policy   │ │
+│  │   Simulator│ │           │  └────────────┘ │
+│  └────────────┘ │           └─────────────────┘
+└─────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────────┐
 │                         O3DE Simulator                          │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐              │
 │  │   场景      │  │   机器人    │  │  ROS2 Sensor │              │
 │  │  (动态加载) │  │  Entity     │  │  RGB/Depth   │              │
 │  └─────────────┘  └─────────────┘  └─────────────┘              │
-│         ▲                ▲                   │                   │
-│         │                │                   │ ROS2 Topics       │
-│         │ o3de_sim API   │                   ▼                   │
-└─────────┼────────────────┼──────────┐ ┌─────────────┐           │
-          │                │          │ │ Action       │           │
-          │                │          │ │ Executor     │           │
-          │                │          │ │ (复用action_ │           │
-          │                │          │ │  executor.py)│           │
-          │                │          └─────────────┘           │
-          │                │                    │                 │
-          ▼                ▼                    ▼                 │
-┌─────────────────────────────────────────────────────────────────┤
-│                        VLN Evaluator                             │
-│  ┌──────────────────┐    ┌──────────────────┐                   │
-│  │ Episode Manager  │    │  Success Judge   │                   │
-│  │ - 加载R2R数据集  │    │ - O3DE API查询   │                   │
-│  │ - 动态创建场景   │    │   机器人位姿     │                   │
-│  │ - 设置初始位置   │    │ - 计算距离误差   │                   │
-│  └──────────────────┘    └──────────────────┘                   │
-│  ┌──────────────────┐    ┌──────────────────┐                   │
-│  │  Sensor Subscriber│   │  Action Executor │                   │
-│  │ - ROS2订阅       │    │ - ROS2 /cmd_vel  │                   │
-│  │ - 缓存最新数据   │    │ - 动作执行器     │                   │
-│  └──────────────────┘    └──────────────────┘                   │
-│  ┌──────────────────────────────────────────┐                   │
-│  │       WebSocket Policy Client            │                   │
-│  │  act(rgb, depth, instruction) → 0/1/2/3  │                   │
-│  └──────────────────────────────────────────┘                   │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼ WebSocket
@@ -102,111 +106,144 @@ distance = euclidean_distance(current_pos, goal_position)
 
 ### 3.2 模块设计
 
-#### 3.2.1 EpisodeManager模块
-负责数据集加载和场景管理
+#### 3.2.1 Env接口（环境接口）
+遵循Habitat-lab标准的Env抽象接口，封装仿真器内部实现
 
 **功能**：
-- 加载R2R格式JSON数据集
-- 通过o3de_sim API动态创建场景
-- 设置机器人初始位置和朝向
-- 管理episode生命周期
+- 环境重置（reset）：根据Episode配置初始化场景
+- 步进执行（step）：执行动作并返回观察、奖励、完成标志和信息
+- 资源清理（close）：释放环境资源
 
 **接口设计**：
 ```python
-class EpisodeManager:
-    def load_dataset(self, dataset_path: str) -> List[Episode]
-    def setup_scene(self, scene_id: str) -> None
-    def setup_robot(self, start_pos, start_rot) -> EntityId
-    def get_goal_position(self) -> Vector3
-    def reset_scene(self) -> None
+class Env(abc.ABC):
+    """Environment interface following Habitat-lab conventions"""
+
+    @abc.abstractmethod
+    def reset(self, episode: Episode) -> Dict[str, np.ndarray]:
+        """Reset environment with episode config
+
+        Returns:
+            obs: {'rgb': ndarray, 'depth': ndarray}
+        """
+        pass
+
+    @abc.abstractmethod
+    def step(self, action: int) -> Tuple[obs, reward, done, info]:
+        """Execute one step
+
+        Returns:
+            obs: {'rgb': ndarray, 'depth': ndarray}
+            reward: float (0.0 for VLN)
+            done: bool
+            info: {'position', 'distance_to_goal', 'collision_count', 'trajectory'}
+        """
+        pass
+
+    @abc.abstractmethod
+    def close(self):
+        """Clean up environment resources"""
+        pass
 ```
 
-#### 3.2.2 SensorSubscriber模块
-负责ROS2传感器数据订阅
+**实现类**：
+- `MockEnv`：Mock环境，用于测试（无O3DE/ROS2依赖）
+- `O3DEEnv`：生产环境，内部封装O3DESimulator
+
+#### 3.2.2 Policy接口（策略接口）
+动作选择的抽象接口
 
 **功能**：
-- 订阅 `/rgb`, `/depth` 图像话题
-- 订阅 `/odom` 里程计话题
-- 订阅 `/scan` 激光话题（碰撞检测）
-- 缓存最新传感器数据
+- 根据观察选择动作
+- 支持本地和远程VLM模型
 
 **接口设计**：
 ```python
-class SensorSubscriber:
-    def get_rgb(self) -> np.ndarray
-    def get_depth(self) -> np.ndarray
-    def get_odom(self) -> Pose
-    def get_collision_status(self) -> bool
-    def wait_for_data(self) -> None
+class Policy(abc.ABC):
+    """Action selection interface"""
+
+    @abc.abstractmethod
+    def act(self, obs: Dict[str, Any]) -> int:
+        """Get action from observation
+
+        Args:
+            obs: {'rgb': ndarray, 'depth': ndarray, 'instruction': str}
+
+        Returns:
+            action: 0=STOP, 1=FORWARD, 2=LEFT, 3=RIGHT
+        """
+        pass
 ```
 
-#### 3.2.3 SuccessJudge模块
-负责成功判定和评测指标计算
+**实现类**：
+- `MockPolicy`：随机策略，用于测试
+- `WebSocketPolicy`：通过WebSocket连接远程VLM服务器
+
+#### 3.2.3 VLNEvaluator主模块
+评测流程编排，使用Env和Policy接口
 
 **功能**：
-- 通过o3de_sim API查询机器人实时位姿
-- 计算到目标的欧氏距离
-- 判断episode成功/失败
-- 记录评测指标
-
-**接口设计**：
-```python
-class SuccessJudge:
-    def get_robot_position(self) -> Vector3  # O3DE API
-    def compute_distance_to_goal(self) -> float
-    def is_success(self, action: int, distance: float) -> bool
-    def is_timeout(self, step: int) -> bool
-```
-
-#### 3.2.4 ActionExecutor模块
-复用现有action_executor.py
-
-**功能**：
-- 通过ROS2 /cmd_vel控制机器人
-- 执行4种基本动作
-- 碰撞检测记录
-
-**接口设计**：
-```python
-class ActionExecutor:
-    def execute_forward_25cm(self) -> None
-    def execute_rotate_15deg(self, direction: str) -> None
-    def stop_robot(self) -> None
-    def get_collision_count(self) -> int
-```
-
-#### 3.2.5 WebSocketPolicyClient模块
-负责与远程VLM模型通信
-
-**功能**：
-- 建立WebSocket连接
-- 发送RGB、Depth、指令给模型
-- 接收模型输出的动作
-
-**接口设计**：
-```python
-class WebSocketPolicyClient:
-    def connect(self, url: str) -> None
-    def act(self, rgb: np.ndarray, depth: np.ndarray,
-            instruction: str) -> int
-    def disconnect(self) -> None
-```
-
-#### 3.2.6 VLNEvaluator主模块
-评测流程编排
-
-**功能**：
-- 编排评测流程
+- 加载R2R数据集
+- 编排评测流程（通过env.reset和policy.act）
 - 记录评测数据
 - 生成评测报告
 
 **接口设计**：
 ```python
 class VLNEvaluator:
-    def __init__(self, config_path: str)
-    def run_evaluation(self, dataset_path: str) -> EvaluationResult
-    def save_results(self, output_path: str) -> None
+    def __init__(self, env: Env, policy: Policy,
+                 default_max_steps: int = 50,
+                 default_success_threshold: float = 0.2)
+
+    def evaluate_dataset(self, dataset_path: str) -> EvaluationResult
+    def evaluate_episode(self, episode: R2REpisode) -> EpisodeResult
+    def save_results(self, results: EvaluationResult, output_path: str)
+    def close(self)
 ```
+
+**使用上下文管理器**：
+```python
+with VLNEvaluator(env=env, policy=policy) as evaluator:
+    results = evaluator.evaluate_dataset(dataset_path)
+    evaluator.save_results(results, output_path)
+```
+
+#### 3.2.4 DatasetLoader模块
+负责数据集加载
+
+**功能**：
+- 加载R2R格式JSON数据集
+- 提供R2REpisode数据类
+
+**接口设计**：
+```python
+@dataclass
+class R2REpisode:
+    episode_id: str
+    scene_id: str
+    instruction: str
+    start_position: Dict[str, float]
+    start_rotation: Dict[str, float]
+    goal_position: Dict[str, float]
+    scene_config_path: Optional[str] = None
+    max_steps: Optional[int] = None
+    success_threshold: Optional[float] = None
+
+class R2RDatasetLoader:
+    @staticmethod
+    def load_from_file(dataset_path: str) -> List[R2REpisode]
+```
+
+#### 3.2.5 O3DESimulator模块
+（内部实现，被O3DEEnv封装）
+
+**功能**：
+- O3DE场景和机器人管理
+- ROS2传感器订阅
+- 动作执行
+- 位姿查询
+
+**注意**：O3DESimulator不直接暴露给VLNEvaluator，而是通过O3DEEnv接口访问
 
 ## 四、数据格式定义
 
@@ -297,30 +334,28 @@ class VLNEvaluator:
 加载R2R数据集
   │
   ▼
-初始化O3DE连接
-  │
-  ▼
-初始化ROS2节点和订阅器
-  │
-  ▼
-连接WebSocket VLM服务
+初始化Env和Policy
+  ├─ env = O3DEEnv(simulator_config) 或 MockEnv()
+  └─ policy = WebSocketPolicy(...) 或 MockPolicy()
   │
   ▼
 ┌─────────────────────────┐
 │  for each episode:      │
 │                         │
-│  1. 加载场景            │
-│  2. 设置机器人初始位置  │
-│  3. 获取目标位置        │
-│  4. 评测循环：          │
-│     while step < max:   │
-│       a. 获取RGB/Depth  │
-│       b. 调用VLM获取动作│
-│       c. 执行动作       │
-│       d. O3DE API查询位姿│
-│       e. 计算距离       │
-│       f. 判断成功/失败  │
-│  5. 记录结果           │
+│  1. env.reset(episode)  │
+│  2. obs['instruction']  │
+│     = episode.instruction│
+│  3. 评测循环：          │
+│     while not done:     │
+│       a. action =       │
+│          policy.act(obs)│
+│       b. obs, reward,   │
+│          done, info =   │
+│          env.step(action)│
+│       c. obs['instruction│
+│          '] = episode.  │
+│          instruction    │
+│  4. 记录结果           │
 └─────────────────────────┘
   │
   ▼
@@ -330,69 +365,77 @@ class VLNEvaluator:
 保存JSON结果
   │
   ▼
+关闭env (env.close())
+  │
+  ▼
 结束
 ```
 
 ### 5.2 详细评测循环伪代码
 
 ```python
-def run_episode(episode, max_steps=50, success_threshold=0.2):
-    # 1. 设置场景和机器人
-    episode_manager.setup_scene(episode.scene_id)
-    robot_id = episode_manager.setup_robot(
-        episode.start_position,
-        episode.start_rotation
-    )
-    goal_pos = episode.goal_position
+def evaluate_episode(env: Env, policy: Policy, r2r_ep: R2REpisode,
+                    default_max_steps=50, default_success_threshold=0.2):
+    """
+    单episode评测流程 - 使用Env和Policy接口
+    """
+    # 1. 转换R2REpisode为Episode
+    max_steps = r2r_ep.max_steps or default_max_steps
+    success_threshold = r2r_ep.success_threshold or default_success_threshold
 
-    # 2. 初始化状态
-    trajectory = []
-    collision_count = 0
+    episode = Episode(
+        episode_id=r2r_ep.episode_id,
+        scene_id=r2r_ep.scene_id,
+        start_position=r2r_ep.start_position,
+        start_rotation=r2r_ep.start_rotation,
+        goal_position=r2r_ep.goal_position,
+        instruction=r2r_ep.instruction,
+        scene_config_path=r2r_ep.scene_config_path,
+        max_steps=max_steps,
+        success_threshold=success_threshold
+    )
+
+    # 2. Reset环境
+    obs = env.reset(episode)
+
+    # 3. 添加instruction到observation (VLN需要文本指令)
+    obs['instruction'] = r2r_ep.instruction
+
+    # 4. 初始化状态
     success = False
     failure_reason = None
 
-    # 3. 评测循环
+    # 5. 评测循环
     for step in range(max_steps):
-        # 3.1 获取传感器数据
-        rgb = sensor_sub.get_rgb()
-        depth = sensor_sub.get_depth()
+        # 5.1 通过policy获取动作
+        action = policy.act(obs)
 
-        # 3.2 调用VLM模型
-        action = ws_client.act(rgb, depth, episode.instruction)
+        # 5.2 通过env执行动作
+        obs, reward, done, info = env.step(action)
 
-        # 3.3 执行动作
-        action_executor.execute_action(action)
+        # 5.3 重新添加instruction到observation (下一步使用)
+        obs['instruction'] = r2r_ep.instruction
 
-        # 3.4 通过O3DE API查询机器人位姿
-        current_pos = success_judge.get_robot_position()
-        trajectory.append(current_pos)
-
-        # 3.5 计算距离
-        distance = success_judge.compute_distance_to_goal(current_pos, goal_pos)
-
-        # 3.6 检测碰撞
-        if sensor_sub.get_collision_status():
-            collision_count += 1
-
-        # 3.7 判断成功
-        if action == 0 and distance < success_threshold:
-            success = True
+        # 5.4 检查是否完成
+        if done:
+            # success由distance_to_goal决定
+            success = (info['distance_to_goal'] < success_threshold)
+            if not success:
+                failure_reason = 'timeout'
             break
 
-    # 4. 处理超时
-    if step >= max_steps - 1:
-        failure_reason = "timeout"
-
-    # 5. 返回结果
-    return {
-        "episode_id": episode.episode_id,
-        "success": success,
-        "failure_reason": failure_reason,
-        "final_distance_to_goal": distance,
-        "steps": step + 1,
-        "collision_count": collision_count,
-        "trajectory": trajectory
-    }
+    # 6. 返回结果
+    return EpisodeResult(
+        episode_id=r2r_ep.episode_id,
+        scene_id=r2r_ep.scene_id,
+        instruction=r2r_ep.instruction,
+        success=success,
+        failure_reason=failure_reason,
+        final_distance_to_goal=info['distance_to_goal'],
+        steps=step + 1,
+        collision_count=info.get('collision_count', 0),
+        trajectory=info.get('trajectory', [])
+    )
 ```
 
 ## 六、技术实现要点
@@ -511,27 +554,73 @@ model:
 ```
 nav-eval/
 ├── docs/
-│   └── VLN_EVALUATION_DESIGN.md    # 本文档
-├── o3de_sim/
-│   └── (现有的o3de_sim库)
-├── action_executor.py              # 现有，复用
-├── policy.py                       # 现有，WebSocketPolicy
-├── env.py                          # 现有，需要扩展
-├── eval.py                         # 现有Habitat评测，新建O3DE评测
-├── vln_evaluator/                  # 新增模块
-│   ├── __init__.py
-│   ├── episode_manager.py          # Episode管理
-│   ├── sensor_subscriber.py        # ROS2传感器订阅
-│   ├── success_judge.py            # 成功判定
-│   ├── action_executor_wrapper.py  # 动作执行器封装
-│   ├── ws_policy_client.py         # WebSocket客户端
-│   └── vln_o3de_evaluator.py       # 主评测器
+│   ├── VLN_EVALUATION_DESIGN.md       # 本文档
+│   ├── O3DE_SIMULATOR_DESIGN.md       # O3DE Simulator设计文档
+│   └── IMPLEMENTATION_DETAILS.md      # 实现细节文档
+├── vln_evaluator/                     # VLN评测器模块包
+│   ├── __init__.py                    # 模块导出
+│   ├── env.py                         # Env接口（Env, MockEnv, O3DEEnv）
+│   ├── policy.py                      # Policy接口（Policy, MockPolicy, WebSocketPolicy）
+│   ├── dataset_loader.py              # R2R数据集加载器
+│   └── vln_evaluator.py               # 主评测器
+├── o3de_sim/                          # O3DE仿真接口库（现有）
+│   ├── o3de_api/
+│   │   ├── o3de_agent.py              # O3DE Agent
+│   │   ├── socket/                    # Socket模式API
+│   │   ├── peb/                       # PEB模式API
+│   │   └── interface/                 # 通用接口
+│   └── common/
+│       └── scene_builder/             # 场景构建器
+├── o3de_simulator.py                  # O3DE仿真器（内部实现）
+├── action_executor.py                 # ROS2动作执行器（现有，被O3DESimulator使用）
+├── run_vln_eval.py                    # 评测运行脚本
 ├── configs/
-│   └── vln_o3de_eval.yaml         # 评测配置
+│   └── vln_eval.yaml                  # 评测配置文件
 ├── datasets/
-│   └── sample_r2r.json            # 示例数据集
-└── results/
-    └── (评测结果输出目录)
+│   └── sample_r2r.json                # 示例R2R数据集
+└── results/                           # 评测结果输出目录
+```
+
+### 使用示例
+
+**示例1：使用Mock组件进行测试**
+```python
+from vln_evaluator import VLNEvaluator, MockEnv
+from vln_evaluator.policy import MockPolicy
+
+env = MockEnv()
+policy = MockPolicy()
+evaluator = VLNEvaluator(env, policy)
+results = evaluator.evaluate_dataset('datasets/sample_r2r.json')
+evaluator.save_results(results, 'results/test_eval.json')
+```
+
+**示例2：使用O3DE + WebSocket VLM**
+```python
+from vln_evaluator import VLNEvaluator, O3DEEnv
+from vln_evaluator.policy import WebSocketPolicy
+
+env = O3DEEnv(simulator_config={'mode': 'socket'})
+policy = WebSocketPolicy('localhost', '8080')
+with VLNEvaluator(env=env, policy=policy) as evaluator:
+    results = evaluator.evaluate_dataset('datasets/sample_r2r.json')
+    evaluator.save_results(results, 'results/o3de_eval.json')
+```
+
+**示例3：使用便捷函数**
+```python
+from vln_evaluator import evaluate_vln
+from vln_evaluator.env import O3DEEnv
+from vln_evaluator.policy import WebSocketPolicy
+
+env = O3DEEnv(simulator_config={'mode': 'socket'})
+policy = WebSocketPolicy('192.168.1.100', '9999')
+evaluate_vln(
+    dataset_path='datasets/sample_r2r.json',
+    output_path='results/eval.json',
+    env=env,
+    policy=policy
+)
 ```
 
 ## 九、待确认事项
@@ -555,27 +644,87 @@ nav-eval/
 
 ## 十一、实现记录 (Implementation Notes)
 
+### 架构变更
+
+系统已重构为使用Env和Policy接口，主要变更：
+
+1. **VLNEvaluator现在使用`env`和`policy`接口**，不再直接访问simulator_config和vlm_config
+2. **Env接口** (`Env`, `MockEnv`, `O3DEEnv`) 将仿真器内部封装，遵循Habitat-lab约定
+3. **Policy接口** (`Policy`, `MockPolicy`, `WebSocketPolicy`) 处理动作选择
+4. **Observation字典**包含 `{'rgb', 'depth', 'instruction'}`，其中instruction由VLNEvaluator注入
+
 ### 已实现模块
 
-#### 1. o3de_simulator.py
-**位置**: `/root/workspace/cloudrobo/nav-eval/o3de_simulator.py`
+#### 1. vln_evaluator/env.py
+**位置**: `/root/workspace/cloudrobo/nav-eval/vln_evaluator/env.py`
 
 **实现内容**:
-- `O3DESimulator` 类：Habitat风格的仿真器接口（reset/step/close）
-- `SensorSubscriber`：ROS2传感器订阅器（RGB/Depth/Scan）
-- `ActionExecutorWrapper`：动作执行器封装（复用action_executor逻辑）
-- `O3DEAgentManager`：O3DE Agent管理器
-- 工具函数：欧拉角/四元数转换、距离计算等
+- `Episode` 数据类：Episode配置
+- `Env` 抽象基类：环境接口（reset/step/close）
+- `MockEnv`：Mock环境，用于测试（无O3DE/ROS2依赖）
+- `O3DEEnv`：生产环境，内部封装O3DESimulator
 
 **核心接口**:
 ```python
-sim = O3DESimulator(mode='socket', success_threshold=0.2)
-obs = sim.reset(episode)  # Returns: {'rgb': ndarray, 'depth': ndarray}
-obs, reward, done, info = sim.step(action)  # info包含position, distance_to_goal, collision
-sim.close()
+# 抽象接口
+class Env(abc.ABC):
+    def reset(self, episode: Episode) -> Dict[str, np.ndarray]
+    def step(self, action: int) -> Tuple[obs, reward, done, info]
+    def close(self)
+
+# 使用示例
+env = O3DEEnv(simulator_config={'mode': 'socket'})
+obs = env.reset(episode)  # {'rgb': ..., 'depth': ...}
+obs, reward, done, info = env.step(action)
+env.close()
 ```
 
-#### 2. vln_evaluator/dataset_loader.py
+#### 2. vln_evaluator/policy.py
+**位置**: `/root/workspace/cloudrobo/nav-eval/vln_evaluator/policy.py`
+
+**实现内容**:
+- `Policy` 抽象基类：动作选择接口
+- `MockPolicy`：随机策略，用于测试
+- `WebSocketPolicy`：通过WebSocket连接远程VLM服务器
+
+**核心接口**:
+```python
+class Policy(abc.ABC):
+    def act(self, obs: Dict[str, Any]) -> int  # 返回 0/1/2/3
+
+# 使用示例
+policy = WebSocketPolicy('localhost', '8080')
+action = policy.act(obs)  # obs包含 {'rgb', 'depth', 'instruction'}
+```
+
+#### 3. vln_evaluator/vln_evaluator.py
+**位置**: `/root/workspace/cloudrobo/nav-eval/vln_evaluator/vln_evaluator.py`
+
+**实现内容**:
+- `EpisodeResult` 数据类：单episode结果
+- `EvaluationResult` 数据类：整体评测结果
+- `VLNEvaluator` 类：主评测器，使用Env和Policy接口
+
+**核心接口**:
+```python
+# 使用Env和Policy接口初始化
+evaluator = VLNEvaluator(env=env, policy=policy,
+                         default_max_steps=50,
+                         default_success_threshold=0.2)
+
+# 评测数据集
+results = evaluator.evaluate_dataset(dataset_path)
+
+# 保存结果
+evaluator.save_results(results, output_path)
+
+# 使用上下文管理器
+with VLNEvaluator(env=env, policy=policy) as evaluator:
+    results = evaluator.evaluate_dataset(dataset_path)
+    evaluator.save_results(results, output_path)
+```
+
+#### 4. vln_evaluator/dataset_loader.py
 **位置**: `/root/workspace/cloudrobo/nav-eval/vln_evaluator/dataset_loader.py`
 
 **实现内容**:
@@ -583,43 +732,18 @@ sim.close()
 - `R2RDatasetLoader` 类：加载/保存R2R格式数据集
 - `create_sample_dataset()` 函数：创建示例数据集
 
-#### 3. vln_evaluator/ws_policy_client.py
-**位置**: `/root/workspace/cloudrobo/nav-eval/vln_evaluator/ws_policy_client.py`
+#### 5. o3de_simulator.py (内部实现)
+**位置**: `/root/workspace/cloudrobo/nav-eval/o3de_simulator.py`
 
 **实现内容**:
-- `WebSocketPolicyClient` 类：与远程VLM服务器通信
-- 支持pickle和JSON两种序列化方式
-- 支持多种响应格式（int、dict、string）
-- `WebSocketPolicy` 别名类（兼容policy.py）
+- `O3DESimulator` 类：Habitat风格的仿真器接口（reset/step/close）
+- `SensorSubscriber`：ROS2传感器订阅器（RGB/Depth/Scan）
+- `ActionExecutorWrapper`：动作执行器封装（复用action_executor逻辑）
+- `O3DEAgentManager`：O3DE Agent管理器
 
-**核心接口**:
-```python
-client = WebSocketPolicyClient(url='ws://localhost:8080')
-client.connect()
-action = client.act(rgb, depth, instruction)
-client.disconnect()
-```
+**注意**: O3DESimulator不直接暴露给VLNEvaluator，而是通过O3DEEnv接口访问
 
-#### 4. vln_evaluator/vln_evaluator.py
-**位置**: `/root/workspace/cloudrobo/nav-eval/vln_evaluator/vln_evaluator.py`
-
-**实现内容**:
-- `EpisodeResult` 数据类：单episode结果
-- `EvaluationResult` 数据类：整体评测结果
-- `VLNEvaluator` 类：主评测器
-
-**核心接口**:
-```python
-# 方式1：使用类
-with VLNEvaluator(simulator_config=..., vlm_config=...) as evaluator:
-    results = evaluator.evaluate_dataset(dataset_path)
-    evaluator.save_results(results, output_path)
-
-# 方式2：使用便捷函数
-evaluate_vln(dataset_path, output_path, simulator_config, vlm_config)
-```
-
-#### 5. run_vln_eval.py
+#### 6. run_vln_eval.py
 **位置**: `/root/workspace/cloudrobo/nav-eval/run_vln_eval.py`
 
 **实现内容**:
@@ -641,16 +765,16 @@ VLN评测配置文件（simulator、vlm、evaluation、logging）
 nav-eval/
 ├── docs/
 │   ├── VLN_EVALUATION_DESIGN.md       # 本文档
-│   └── O3DE_SIMULATOR_DESIGN.md       # O3DE Simulator设计文档
+│   ├── O3DE_SIMULATOR_DESIGN.md       # O3DE Simulator设计文档
+│   └── IMPLEMENTATION_DETAILS.md      # 实现细节文档
 ├── vln_evaluator/                     # VLN评测器模块
-│   ├── __init__.py
+│   ├── __init__.py                    # 模块导出
+│   ├── env.py                         # Env接口
+│   ├── policy.py                      # Policy接口
 │   ├── dataset_loader.py              # R2R数据集加载器
-│   ├── ws_policy_client.py            # WebSocket VLM客户端
 │   └── vln_evaluator.py               # 主评测器
-├── o3de_simulator.py                  # O3DE仿真器（新增）
-├── action_executor.py                 # 现有ROS2动作执行器
-├── policy.py                          # 现有WebSocket Policy
-├── env.py                             # 现有抽象Env类
+├── o3de_simulator.py                  # O3DE仿真器（内部实现）
+├── action_executor.py                 # ROS2动作执行器（被O3DESimulator使用）
 ├── run_vln_eval.py                    # 评测运行脚本
 ├── configs/
 │   └── vln_eval.yaml                  # 评测配置文件

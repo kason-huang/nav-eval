@@ -4,12 +4,50 @@
 
 ## 项目简介
 
-本系统提供完整的VLN评测流程，支持：
+本系统提供完整的VLN评测流程，采用**Env/Policy接口设计**，遵循Habitat-lab约定：
+
 - **O3DE仿真环境**：基于Open 3D Engine的物理仿真
+- **Env接口**：标准环境接口（reset/step/close），封装仿真器内部实现
+- **Policy接口**：动作选择接口，支持本地和远程VLM
 - **ROS2集成**：通过ROS2话题获取传感器数据和控制机器人
-- **远程VLM**：通过WebSocket连接远程视觉-语言模型
 - **R2R数据集**：支持R2R格式的导航指令数据集
-- **Habitat风格接口**：reset/step/close标准接口
+
+## 架构设计
+
+系统采用**Env-Policy分离架构**：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        VLNEvaluator                             │
+│  ┌──────────────────┐    ┌──────────────────┐                   │
+│  │ Dataset Loader   │    │  Result Manager  │                   │
+│  └──────────────────┘    └──────────────────┘                   │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │              Evaluation Loop                             │   │
+│  │    obs = env.reset(episode)                             │   │
+│  │    action = policy.act(obs)                              │   │
+│  │    obs, reward, done, info = env.step(action)            │   │
+│  └──────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+         │                              │
+         ▼                              ▼
+┌─────────────────┐           ┌─────────────────┐
+│      Env        │           │     Policy      │
+│  (Environment   │           │  (Action        │
+│   Interface)    │           │   Selection)    │
+│  ┌────────────┐ │           │  ┌────────────┐ │
+│  │ MockEnv    │ │           │  │ MockPolicy │ │
+│  │ O3DEEnv    │ │           │  │ WebSocket  │ │
+│  │   └──O3DE  │ │           │  │   Policy   │ │
+│  │   Simulator│ │           │  └────────────┘ │
+│  └────────────┘ │           └─────────────────┘
+└─────────────────┘
+```
+
+**关键特性**：
+- **环境抽象**：Env接口隐藏O3DE细节，可轻松替换仿真器
+- **策略抽象**：Policy接口支持不同VLM实现
+- **测试友好**：MockEnv/MockPolicy无需O3DE即可测试
 
 ## 系统要求
 
@@ -79,22 +117,60 @@ nav-eval/
 │   ├── VLN_EVALUATION_DESIGN.md    # VLN评测系统设计
 │   ├── O3DE_SIMULATOR_DESIGN.md    # O3DE Simulator设计
 │   └── IMPLEMENTATION_DETAILS.md   # 实现细节
-├── vln_evaluator/                  # 评测器模块
-│   ├── __init__.py
+├── vln_evaluator/                  # 评测器模块包
+│   ├── __init__.py                 # 模块导出
+│   ├── env.py                      # Env接口（Env, MockEnv, O3DEEnv）
+│   ├── policy.py                   # Policy接口（Policy, MockPolicy, WebSocketPolicy）
 │   ├── dataset_loader.py           # R2R数据集加载器
-│   ├── ws_policy_client.py         # WebSocket VLM客户端
 │   └── vln_evaluator.py            # 主评测器
 ├── o3de_sim/                       # O3DE仿真接口库
 │   └── o3de_api/
-├── o3de_simulator.py               # O3DE仿真器
-├── action_executor.py              # ROS2动作执行器
-├── policy.py                       # WebSocket Policy
+├── o3de_simulator.py               # O3DE仿真器（内部实现）
+├── action_executor.py              # ROS2动作执行器（被O3DESimulator使用）
 ├── run_vln_eval.py                 # 评测运行脚本
 ├── configs/
 │   └── vln_eval.yaml               # 配置文件
 ├── datasets/
 │   └── sample_r2r.json            # 示例数据集
+├── tests/                          # 测试套件
+│   ├── test_evaluation.py          # 主测试文件
+│   └── mock_vlm_server.py          # Mock VLM服务器
 └── results/                        # 结果输出目录
+```
+
+## 快速开始
+
+### 使用Mock组件测试（无需O3DE）
+
+```python
+from vln_evaluator import VLNEvaluator, MockEnv, MockPolicy
+
+# 创建Mock组件
+env = MockEnv()
+policy = MockPolicy()
+
+# 创建评测器
+with VLNEvaluator(env=env, policy=policy) as evaluator:
+    results = evaluator.evaluate_dataset('datasets/sample_r2r.json')
+    print(f"Success Rate: {results.success_rate:.2%}")
+```
+
+### 使用O3DE + WebSocket VLM
+
+```python
+from vln_evaluator import VLNEvaluator, O3DEEnv
+from vln_evaluator.policy import WebSocketPolicy
+
+# 创建环境（O3DE）
+env = O3DEEnv(simulator_config={'mode': 'socket'})
+
+# 创建策略（WebSocket VLM）
+policy = WebSocketPolicy('localhost', '8080')
+
+# 创建评测器
+with VLNEvaluator(env=env, policy=policy) as evaluator:
+    results = evaluator.evaluate_dataset('datasets/sample_r2r.json')
+    evaluator.save_results(results, 'results/eval.json')
 ```
 
 ## 运行准备
@@ -113,18 +189,12 @@ nav-eval/
 
 ### 步骤2: 验证ROS2话题
 
-在终端中运行：
-
 ```bash
 # 检查话题列表
 ros2 topic list
 
 # 应该看到以下话题：
-# /rgb
-# /depth
-# /scan
-# /cmd_vel
-# /odom
+# /rgb, /depth, /scan, /cmd_vel, /odom
 
 # 检查话题数据
 ros2 topic hz /rgb
@@ -133,7 +203,7 @@ ros2 topic echo /rgb --once
 
 ### 步骤3: 启动VLM服务器
 
-根据你的VLM模型启动WebSocket服务器。服务器需要：
+VLM服务器需要接收以下格式的观察并返回动作：
 
 **输入格式**:
 ```python
@@ -152,21 +222,15 @@ ros2 topic echo /rgb --once
 3  # RIGHT
 ```
 
-示例VLM服务器（伪代码）:
+示例VLM服务器：
 ```python
 import websocket
 import pickle
-import numpy as np
 
 def on_message(ws, message):
     obs = pickle.loads(message)
-    rgb = obs['rgb']
-    depth = obs['depth']
-    instruction = obs['instruction']
-
-    # 调用你的VLM模型
-    action = your_vlm_model(rgb, depth, instruction)
-
+    # 调用VLM模型
+    action = your_vlm_model(obs['rgb'], obs['depth'], obs['instruction'])
     ws.send(pickle.dumps(action))
 
 server = websocket.WebSocketServer('0.0.0.0', 8080)
@@ -195,13 +259,6 @@ server.run_forever()
 }
 ```
 
-或使用提供的示例数据集：
-
-```bash
-cp datasets/sample_r2r.json my_dataset.json
-# 编辑 my_dataset.json 添加你的episodes
-```
-
 ## 运行评测
 
 ### 方式1: 使用命令行脚本
@@ -223,100 +280,56 @@ python run_vln_eval.py \
     --dataset datasets/sample_r2r.json \
     --output results/eval_results.json \
     --episodes ep_001 ep_002
-
-# 指定配置文件
-python run_vln_eval.py \
-    --dataset datasets/sample_r2r.json \
-    --output results/eval_results.json \
-    --config configs/vln_eval.yaml
-
-# 覆盖配置项
-python run_vln_eval.py \
-    --dataset datasets/sample_r2r.json \
-    --output results/eval_results.json \
-    --sim-mode socket \
-    --vlm-url ws://localhost:9999
 ```
 
-### 方式2: 使用Python API
+### 方式2: 使用Python API（推荐）
 
 ```python
 from vln_evaluator import VLNEvaluator, evaluate_vln
+from vln_evaluator.env import O3DEEnv
+from vln_evaluator.policy import WebSocketPolicy
 
 # 使用便捷函数
+env = O3DEEnv(simulator_config={'mode': 'socket'})
+policy = WebSocketPolicy('localhost', '8080')
+
 evaluate_vln(
     dataset_path='datasets/sample_r2r.json',
     output_path='results/eval_results.json',
-    simulator_config={
-        'mode': 'socket',
-        'success_threshold': 0.2,
-        'linear_speed': 0.1,
-        'angular_speed': 0.3
-    },
-    vlm_config={
-        'url': 'ws://localhost:8080',
-        'use_pickle': True
-    }
+    env=env,
+    policy=policy
 )
-
-# 或使用类（更灵活控制）
-from vln_evaluator import VLNEvaluator
-
-with VLNEvaluator(
-    simulator_config={'mode': 'socket'},
-    vlm_config={'url': 'ws://localhost:8080'}
-) as evaluator:
-
-    # 运行评测
-    results = evaluator.evaluate_dataset(
-        dataset_path='datasets/sample_r2r.json'
-    )
-
-    # 保存结果
-    evaluator.save_results(results, 'results/eval_results.json')
-
-    # 访问统计
-    print(f"Success Rate: {results.success_rate:.2%}")
-    print(f"Avg Distance: {results.avg_distance_error:.3f}m")
 ```
 
-### 方式3: 直接使用Simulator
+### 方式3: 完整控制
 
 ```python
-from o3de_simulator import O3DESimulator, Episode
+from vln_evaluator import VLNEvaluator
+from vln_evaluator.env import O3DEEnv
+from vln_evaluator.policy import WebSocketPolicy
 
-# 创建仿真器
-sim = O3DESimulator(mode='socket', success_threshold=0.2)
+# 创建环境
+env = O3DEEnv(simulator_config={
+    'mode': 'socket',
+    'success_threshold': 0.2
+})
 
-# 定义episode
-episode = Episode(
-    episode_id='ep_001',
-    scene_id='scene_001',
-    start_position={'x': 0, 'y': 0, 'z': 0},
-    start_rotation={'x': 0, 'y': 0, 'z': 0},
-    goal_position={'x': 3, 'y': 0, 'z': 0},
-    instruction='Walk forward 3 meters',
-    max_steps=50
-)
+# 创建策略
+policy = WebSocketPolicy('localhost', '8080')
 
-# Reset
-obs = sim.reset(episode)
+# 创建评测器
+with VLNEvaluator(env=env, policy=policy,
+                   default_max_steps=50,
+                   default_success_threshold=0.2) as evaluator:
 
-# 评测循环
-for step in range(50):
-    # 获取action（这里需要你自己调用VLM）
-    action = your_vlm_function(obs['rgb'], obs['depth'], episode.instruction)
+    # 评测单个episode
+    result = evaluator.evaluate_episode(r2r_episode)
+    print(f"Success: {result.success}")
+    print(f"Distance: {result.final_distance_to_goal:.3f}m")
 
-    # Step
-    obs, reward, done, info = sim.step(action)
-
-    print(f"Step {step}: distance={info['distance_to_goal']:.3f}m")
-
-    if done:
-        print(f"Done! Success: {info['distance_to_goal'] < 0.2}")
-        break
-
-sim.close()
+    # 或评测整个数据集
+    results = evaluator.evaluate_dataset('datasets/sample_r2r.json')
+    evaluator.save_results(results, 'results/eval_results.json')
 ```
 
 ## 配置说明
@@ -331,25 +344,19 @@ simulator:
   collision_threshold: 0.3          # 碰撞检测阈值(米)
   linear_speed: 0.1                 # 线速度(m/s)
   angular_speed: 0.3                # 角速度(rad/s)
-  socket_host: 127.0.0.1
-  socket_port: 8080
 
 # VLM配置
 vlm:
   url: ws://localhost:8080          # WebSocket URL
-  use_pickle: true                  # 序列化方式（true=pickle, false=json）
 
 # 评测配置
 evaluation:
   default_max_steps: 50             # 默认最大步数
   default_success_threshold: 0.2    # 默认成功阈值
-  output_dir: results
-  save_trajectories: true
 
 # 日志配置
 logging:
   level: INFO
-  log_file: logs/vln_eval.log
 ```
 
 ## 输出结果
@@ -370,174 +377,14 @@ logging:
   "episodes": [
     {
       "episode_id": "ep_001",
-      "scene_id": "scene_001",
-      "instruction": "Walk straight forward...",
       "success": true,
-      "failure_reason": null,
       "final_distance_to_goal": 0.12,
       "steps": 18,
       "collision_count": 2,
-      "trajectory": [
-        {"x": 0.0, "y": 0.0, "z": 0.0},
-        {"x": 0.25, "y": 0.0, "z": 0.0},
-        ...
-      ]
+      "trajectory": [...]
     }
   ]
 }
-```
-
-## 常见问题
-
-### Q1: 提示找不到o3de_sim模块
-
-**A**: 确保O3DE的Python路径已添加到PYTHONPATH：
-
-```bash
-# 查找O3DE Python路径
-find /path/to/o3de -name "o3de_sim" -type d
-
-# 添加到环境变量
-export PYTHONPATH=/path/to/o3de/python:$PYTHONPATH
-```
-
-### Q2: ROS2话题没有数据
-
-**A**: 检查以下几点：
-1. O3DE是否进入Game Mode
-2. ROS2 Frame组件是否正确配置
-3. 检查话题QoS配置
-
-```bash
-# 查看话题详情
-ros2 topic info /rgb -v
-
-# 检查是否有数据
-ros2 topic hz /rgb
-```
-
-### Q3: VLM连接失败
-
-**A**:
-1. 确认VLM服务器是否运行：`netstat -an | grep 8080`
-2. 检查防火墙设置
-3. 尝试使用telnet测试：`telnet localhost 8080`
-
-### Q4: 机器人不动
-
-**A**:
-1. 检查O3DE是否启用了物理模拟
-2. 确认机器人有刚体组件
-3. 检查/cmd_vel话题：`ros2 topic echo /cmd_vel`
-
-### Q5: 碰撞检测不工作
-
-**A**:
-1. 确认O3DE场景中有LaserScan传感器
-2. 检查/scan话题：`ros2 topic echo /scan`
-3. 调整碰撞阈值（configs/vln_eval.yaml中的collision_threshold）
-
-## 命令参考
-
-### 完整命令列表
-
-```bash
-python run_vln_eval.py [OPTIONS]
-
-选项:
-  --dataset PATH        R2R数据集JSON文件路径
-  --output PATH         结果输出文件路径
-  --config PATH         配置文件路径 (默认: configs/vln_eval.yaml)
-  --episodes EPISODES   要评测的episode ID列表 (可选)
-  --vlm-url URL         VLM WebSocket服务器URL (覆盖配置文件)
-  --sim-mode MODE       O3DE模式: peb或socket (覆盖配置文件)
-  -h, --help            显示帮助信息
-```
-
-### ROS2调试命令
-
-```bash
-# 列出所有话题
-ros2 topic list
-
-# 查看话题类型和QoS
-ros2 topic info /rgb -v
-
-# 查看话题数据
-ros2 topic echo /rgb
-
-# 查看话题频率
-ros2 topic hz /rgb
-
-# 录制话题数据
-ros2 bag record /rgb /depth /scan
-
-# 回放bag文件
-ros2 bag play recorded_bag
-```
-
-## 进阶使用
-
-### 创建自定义数据集
-
-```python
-from vln_evaluator.dataset_loader import R2REpisode, R2RDatasetLoader
-
-# 创建episodes
-episodes = [
-    R2REpisode(
-        episode_id='custom_001',
-        scene_id='my_scene',
-        instruction='Navigate to the red door',
-        start_position={'x': 0, 'y': 0, 'z': 0},
-        start_rotation={'x': 0, 'y': 0, 'z': 0},
-        goal_position={'x': 5, 'y': 0, 'z': 2},
-        max_steps=100
-    )
-]
-
-# 保存数据集
-R2RDatasetLoader.save_to_file(episodes, 'datasets/my_dataset.json')
-```
-
-### 扩展评测指标
-
-编辑 `vln_evaluator/vln_evaluator.py`，添加自定义指标计算：
-
-```python
-# 在EvaluationResult中添加新字段
-@dataclass
-class EvaluationResult:
-    # 现有字段...
-    custom_metric: float = 0.0
-
-# 在evaluate_dataset中计算
-for ep_result in results.episodes:
-    ep_result.custom_metric = calculate_custom(ep_result)
-```
-
-### 可视化轨迹
-
-```python
-import matplotlib.pyplot as plt
-
-# 读取结果
-import json
-with open('results/eval_results.json') as f:
-    results = json.load(f)
-
-# 绘制第一个episode的轨迹
-traj = results['episodes'][0]['trajectory']
-x = [p['x'] for p in traj]
-z = [p['z'] for p in traj]
-
-plt.plot(x, z, '-o')
-plt.xlabel('X (m)')
-plt.ylabel('Z (m)')
-plt.title('Robot Trajectory')
-plt.grid(True)
-plt.axis('equal')
-plt.savefig('trajectory.png')
 ```
 
 ## 测试（使用Mock组件）
@@ -558,16 +405,17 @@ pip install websocket-client websocket-server pyyaml numpy
 ### 运行测试套件
 
 ```bash
-# 运行完整测试套件
 python tests/test_evaluation.py
 ```
 
-测试套件包含4个测试：
+测试套件包含6个测试：
 
-1. **Test 1: Mock O3DE Simulator** - 测试模拟仿真器的reset/step/close接口
-2. **Test 2: VLM Client** - 测试WebSocket客户端与Mock VLM服务器的通信
-3. **Test 3: 完整评测流程** - 测试Mock Simulator + Mock VLM的完整评测流程
-4. **Test 4: 数据集加载器** - 测试R2R格式数据集的加载和保存
+1. **Test 1: MockEnv** - 测试环境接口（reset/step/close）
+2. **Test 2: MockPolicy** - 测试策略接口（act）
+3. **Test 3: VLNEvaluator with Mocks** - 测试完整评测流程（MockEnv + MockPolicy）
+4. **Test 4: VLNEvaluator with WebSocket** - 测试WebSocketPolicy
+5. **Test 5: evaluate_dataset()** - 测试批量评测
+6. **Test 6: Dataset Loader** - 测试R2R格式数据集
 
 ### 测试输出示例
 
@@ -576,86 +424,99 @@ python tests/test_evaluation.py
 VLN EVALUATION SYSTEM - TEST SUITE
 ======================================================================
 
-✓ Test 1 PASSED - Mock O3DE Simulator (No VLM)
-✓ Test 2 PASSED - VLM Client (Mock Server Required)
-✓ Test 3 PASSED - Full Evaluation (Mock Simulator + Mock VLM)
-✓ Test 4 PASSED - R2R Dataset Loader
+✓ Test 1 PASSED - MockEnv
+✓ Test 2 PASSED - MockPolicy
+✓ Test 3 PASSED - VLNEvaluator (MockEnv + MockPolicy)
+✓ Test 4 PASSED - VLNEvaluator (MockEnv + WebSocketPolicy)
+✓ Test 5 PASSED - evaluate_dataset()
+✓ Test 6 PASSED - Dataset Loader
 
-Results: 4/4 tests passed
+Results: 6/6 tests passed
 ✓ ALL TESTS PASSED!
 ```
 
-### 单独测试Mock组件
+## 常见问题
 
-#### 测试Mock Simulator
+### Q1: 提示找不到o3de_sim模块
 
-```python
-from tests.mock_o3de_simulator import MockO3DESimulator, MockEpisode
-
-sim = MockO3DESimulator(success_threshold=0.2)
-
-episode = MockEpisode(
-    episode_id='test_001',
-    start_position={'x': 0, 'y': 0, 'z': 0},
-    goal_position={'x': 1.0, 'y': 0, 'z': 0},
-    instruction='Walk forward 1 meter',
-    max_steps=10
-)
-
-# Reset and run
-obs = sim.reset(episode)
-for step in range(5):
-    obs, reward, done, info = sim.step(1)  # FORWARD
-    print(f"Step {step+1}: {info}")
-
-sim.close()
-```
-
-#### 启动Mock VLM Server
+确保O3DE的Python路径已添加到PYTHONPATH：
 
 ```bash
-# 启动Mock VLM服务器（普通模式）
-python tests/mock_vlm_server.py --port 8080
+# 查找O3DE Python路径
+find /path/to/o3de -name "o3de_sim" -type d
 
-# 启动Mock VLM服务器（智能导航模式）
-python tests/mock_vlm_server.py --port 8080 --smart
-
-# 使用JSON序列化
-python tests/mock_vlm_server.py --port 8080 --json
+# 添加到环境变量
+export PYTHONPATH=/path/to/o3de/python:$PYTHONPATH
 ```
 
-#### 测试WebSocket通信
+### Q2: ROS2话题没有数据
+
+检查以下几点：
+1. O3DE是否进入Game Mode
+2. ROS2 Frame组件是否正确配置
+3. 检查话题QoS配置
+
+```bash
+# 查看话题详情
+ros2 topic info /rgb -v
+
+# 检查是否有数据
+ros2 topic hz /rgb
+```
+
+### Q3: VLM连接失败
+
+1. 确认VLM服务器是否运行：`netstat -an | grep 8080`
+2. 检查防火墙设置
+3. 尝试使用telnet测试：`telnet localhost 8080`
+
+## 进阶使用
+
+### 创建自定义Policy
 
 ```python
-from vln_evaluator.ws_policy_client import WebSocketPolicyClient
-import numpy as np
+from vln_evaluator.policy import Policy
 
-# 连接Mock服务器
-client = WebSocketPolicyClient(url='ws://localhost:8080')
-client.connect()
+class MyCustomPolicy(Policy):
+    def act(self, obs):
+        rgb = obs['rgb']
+        depth = obs['depth']
+        instruction = obs['instruction']
 
-# 测试通信
-rgb = np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8)
-depth = np.random.randint(0, 10000, (64, 64), dtype=np.uint16)
-instruction = "Walk forward 2 meters"
+        # 你的自定义逻辑
+        action = my_model.predict(rgb, depth, instruction)
 
-action = client.act(rgb, depth, instruction)
-print(f"Received action: {action}")  # 0=STOP, 1=FORWARD, 2=LEFT, 3=RIGHT
+        return action  # 返回 0/1/2/3
 
-client.disconnect()
+# 使用
+from vln_evaluator import VLNEvaluator, MockEnv
+
+env = MockEnv()
+policy = MyCustomPolicy()
+
+with VLNEvaluator(env=env, policy=policy) as evaluator:
+    results = evaluator.evaluate_dataset('datasets/sample_r2r.json')
 ```
 
-### Mock组件说明
+### 创建自定义数据集
 
-**MockO3DESimulator** (`tests/mock_o3de_simulator.py`):
-- 模拟O3DE仿真器，无需真实的O3DE引擎
-- 模拟机器人运动、传感器数据（RGB/Depth）、碰撞检测
-- 提供与真实O3DESimulator相同的接口
+```python
+from vln_evaluator.dataset_loader import R2REpisode, R2RDatasetLoader
 
-**Mock VLM Server** (`tests/mock_vlm_server.py`):
-- WebSocket服务器，模拟VLM模型行为
-- 支持两种模式：随机模式、智能导航模式
-- 支持pickle和JSON序列化
+episodes = [
+    R2REpisode(
+        episode_id='custom_001',
+        scene_id='my_scene',
+        instruction='Navigate to the red door',
+        start_position={'x': 0, 'y': 0, 'z': 0},
+        start_rotation={'x': 0, 'y': 0, 'z': 0},
+        goal_position={'x': 5, 'y': 0, 'z': 2},
+        max_steps=100
+    )
+]
+
+R2RDatasetLoader.save_to_file(episodes, 'datasets/my_dataset.json')
+```
 
 ## 文档
 
