@@ -227,17 +227,20 @@ class VLNEvaluator:
                 trajectory = info.get('trajectory', [])
                 final_distance = info.get('distance_to_goal', float('inf'))
 
-                # Check if done
-                if done:
-                    success = (final_distance < success_threshold)
-                    if not success:
-                        failure_reason = 'timeout'
+                # Check success condition (ignore done from env)
+                if final_distance < success_threshold:
+                    success = True
                     break
 
             except Exception as e:
                 print(f'  Error during evaluation: {e}')
+                traceback.print_exc()
                 failure_reason = f'execution_error: {str(e)}'
                 break
+
+        # Check if failed due to max steps
+        if not success and failure_reason is None:
+            failure_reason = 'timeout'
 
         return EpisodeResult(
             episode_id=r2r_ep.episode_id,

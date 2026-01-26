@@ -405,7 +405,7 @@ class O3DEAgentManager:
             raise RuntimeError('Robot entity not created')
 
         pos = dict_to_vector3(position)
-        self.agent.tc.set_world_position(self.robot_entity_id, pos)
+        self.agent.tc.set_world_translation(self.robot_entity_id, pos)
 
         if rotation:
             quat = euler_to_quaternion(rotation)
@@ -422,7 +422,7 @@ class O3DEAgentManager:
         if self.robot_entity_id is None:
             return None
 
-        pos = self.agent.tc.get_world_position(self.robot_entity_id)
+        pos = self.agent.tc.get_world_translation(self.robot_entity_id)
         return vector3_to_dict(pos)
 
     def get_robot_entity_id(self):

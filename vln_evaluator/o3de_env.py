@@ -36,9 +36,8 @@ class O3DEEnv(Env):
     def _get_simulator(self):
         """Lazy load simulator"""
         if self.simulator is None:
-            from .o3de_simulator import O3DESimulator, Episode as SimEpisode
+            from .o3de_simulator import O3DESimulator
             self.simulator = O3DESimulator(**self.simulator_config)
-            self._SimEpisode = SimEpisode
         return self.simulator
 
     def reset(self, episode: Episode) -> Dict[str, np.ndarray]:
@@ -54,7 +53,7 @@ class O3DEEnv(Env):
         self.current_episode = episode
 
         # Convert Episode to simulator's Episode format
-        sim_episode = self._SimEpisode(
+        sim_episode = Episode(
             episode_id=episode.episode_id,
             scene_id=episode.scene_id,
             start_position=episode.start_position,
