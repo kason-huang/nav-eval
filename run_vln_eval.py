@@ -12,7 +12,6 @@ from pathlib import Path
 from vln_evaluator import VLNEvaluator, evaluate_vln, O3DEEnv, MockPolicy
 # from vln_evaluator import VLNEvaluator, evaluate_vln, O3DEEnv, WebSocketPolicy
 
-
 def load_config(config_path: str) -> dict:
     """Load YAML configuration file"""
     with open(config_path, 'r') as f:

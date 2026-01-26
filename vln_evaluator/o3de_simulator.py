@@ -304,7 +304,7 @@ class ActionExecutorWrapper:
             raise RuntimeError("ROS2 is not available. Please install ROS2 or use MockO3DESimulator for testing.")
 
         # Import VLNActionExecutor from action_executor.py
-        import action_executor
+        from . import action_executor
         self.executor = action_executor.VLNActionExecutor()
 
         # Set speed parameters (executor has default values, we can override them)

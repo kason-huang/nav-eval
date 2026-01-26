@@ -160,7 +160,7 @@ class O3DEEnv(Env):
     def _get_simulator(self):
         """Lazy load simulator"""
         if self.simulator is None:
-            from o3de_simulator import O3DESimulator
+            from .o3de_simulator import O3DESimulator
             self.simulator = O3DESimulator(**self.simulator_config)
         return self.simulator
 

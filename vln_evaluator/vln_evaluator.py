@@ -6,6 +6,7 @@ Orchestrates VLN evaluation using Env and Policy.
 """
 
 import json
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Dict, Any, Optional, TYPE_CHECKING, Callable
@@ -190,6 +191,7 @@ class VLNEvaluator:
             obs = self.env.reset(episode)
         except Exception as e:
             print(f'  Error resetting environment: {e}')
+            traceback.print_exc()
             return EpisodeResult(
                 episode_id=r2r_ep.episode_id,
                 scene_id=r2r_ep.scene_id,
