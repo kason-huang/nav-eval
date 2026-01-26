@@ -9,7 +9,8 @@ import argparse
 import yaml
 from pathlib import Path
 
-from vln_evaluator import VLNEvaluator, evaluate_vln
+from vln_evaluator import VLNEvaluator, evaluate_vln, O3DEEnv, MockPolicy
+# from vln_evaluator import VLNEvaluator, evaluate_vln, O3DEEnv, WebSocketPolicy
 
 
 def load_config(config_path: str) -> dict:
@@ -70,11 +71,22 @@ def main():
     print(f'Simulator:   {simulator_config["mode"]} mode')
     print('='*60)
 
+    # Parse VLM URL to extract ip and port
+    # from urllib.parse import urlparse
+    # parsed_url = urlparse(vlm_config["url"])
+    # ip = parsed_url.hostname or 'localhost'
+    # port = parsed_url.port or 8080
+
+    # Create env and policy instances
+    env = O3DEEnv(simulator_config)
+    # policy = WebSocketPolicy(ip, str(port))
+    policy = MockPolicy()
+
     evaluate_vln(
         dataset_path=args.dataset,
         output_path=args.output,
-        simulator_config=simulator_config,
-        vlm_config=vlm_config,
+        env=env,
+        policy=policy,
         episode_ids=args.episodes
     )
 
