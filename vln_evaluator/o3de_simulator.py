@@ -170,12 +170,6 @@ class SensorSubscriber:
                 depth=10
             )
 
-        # Initialize ROS2 node (if not already initialized)
-        try:
-            rclpy.get_context().ok()
-        except:
-            rclpy.init()
-
         self.node = rclpy.create_node('o3de_sensor_subscriber')
         self.bridge = CvBridge()
 

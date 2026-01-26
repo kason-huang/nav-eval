@@ -12,12 +12,6 @@ import time
 
 class VLNActionExecutor(Node):
     def __init__(self):
-        # Initialize ROS2 if not already initialized
-        try:
-            rclpy.get_context().ok()
-        except:
-            rclpy.init()
-
         super().__init__('vln_action_executor')
         
         # === QoS: 与 O3DE 的 SENSOR_DATA 兼容 ===
