@@ -302,34 +302,54 @@ def evaluate_vln(dataset_path: str,
     Returns:
         EvaluationResult
     """
-    with VLNEvaluator(env=env, policy=policy) as evaluator:
-        # Progress callback
-        def progress_callback(current, total):
-            print(f'\n=== Progress: {current}/{total} episodes ===')
+    # Initialize ROS2 if available (for O3DEEnv with RGBD sensor)
+    try:
+        import rclpy
+        try:
+            rclpy.get_context().ok()
+        except:
+            rclpy.init()
+        rclpy_initialized = True
+    except ImportError:
+        rclpy_initialized = False
 
-        # Run evaluation
-        results = evaluator.evaluate_dataset(
-            dataset_path=dataset_path,
-            episode_ids=episode_ids,
-            progress_callback=progress_callback
-        )
+    try:
+        with VLNEvaluator(env=env, policy=policy) as evaluator:
+            # Progress callback
+            def progress_callback(current, total):
+                print(f'\n=== Progress: {current}/{total} episodes ===')
 
-        # Save results
-        evaluator.save_results(results, output_path)
+            # Run evaluation
+            results = evaluator.evaluate_dataset(
+                dataset_path=dataset_path,
+                episode_ids=episode_ids,
+                progress_callback=progress_callback
+            )
 
-        # Print summary
-        print('\n' + '='*50)
-        print('EVALUATION SUMMARY')
-        print('='*50)
-        print(f'Total Episodes:  {results.total_episodes}')
-        print(f'Success Count:   {results.success_count}')
-        print(f'Success Rate:    {results.success_rate:.2%}')
-        print(f'Avg Distance:    {results.avg_distance_error:.3f}m')
-        print(f'Avg Steps:       {results.avg_steps:.1f}')
-        print(f'Timeout Count:   {results.timeout_count}')
-        print('='*50)
+            # Save results
+            evaluator.save_results(results, output_path)
 
-        return results
+            # Print summary
+            print('\n' + '='*50)
+            print('EVALUATION SUMMARY')
+            print('='*50)
+            print(f'Total Episodes:  {results.total_episodes}')
+            print(f'Success Count:   {results.success_count}')
+            print(f'Success Rate:    {results.success_rate:.2%}')
+            print(f'Avg Distance:    {results.avg_distance_error:.3f}m')
+            print(f'Avg Steps:       {results.avg_steps:.1f}')
+            print(f'Timeout Count:   {results.timeout_count}')
+            print('='*50)
+
+            return results
+    finally:
+        # Shutdown ROS2 if we initialized it
+        if rclpy_initialized:
+            try:
+                import rclpy
+                rclpy.shutdown()
+            except:
+                pass
 
 
 if __name__ == '__main__':
