@@ -1,6 +1,6 @@
 import abc
 import random
-import websocket
+import websockets.sync.client
 import pickle
 from typing import Dict, Any
 
@@ -21,7 +21,7 @@ class Policy(abc.ABC):
 class WebSocketPolicy(Policy):
     def __init__(self, ip: str, port: str):
         self.url = f"ws://{ip}:{port}"
-        self.ws = websocket.create_connection(self.url)
+        self.ws = websockets.sync.client.connect(self.url)
 
     def act(self, obs: Dict[str, Any]) -> int:
         """
