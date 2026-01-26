@@ -2,3 +2,4 @@ numpy==1.21.5
 websockets==15.0.1
 PyYAML
 requests
+opencv-python==4.11.0.86

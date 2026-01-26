@@ -16,6 +16,9 @@ from enum import Enum
 
 import numpy as np
 
+# Import Episode from env.py
+from .env import Episode
+
 # ROS2 imports (optional, for testing without ROS2)
 try:
     import rclpy
@@ -58,22 +61,6 @@ except:
 # =============================================================================
 # Data Structures
 # =============================================================================
-
-@dataclass
-class Episode:
-    """Episode data structure for VLN evaluation"""
-    episode_id: str
-    scene_id: str
-    start_position: Dict[str, float]  # {'x': 0.0, 'y': 0.0, 'z': 0.0}
-    start_rotation: Dict[str, float]  # {'x': 0, 'y': 0, 'z': 0} (欧拉角, 度)
-    goal_position: Dict[str, float]   # {'x': 5.0, 'y': 0.0, 'z': 3.0}
-    instruction: str
-
-    # Optional fields
-    scene_config_path: Optional[str] = None
-    max_steps: Optional[int] = None
-    success_threshold: Optional[float] = None
-
 
 class ActionType(Enum):
     """Action types for VLN"""
