@@ -628,13 +628,40 @@ class O3DESimulator:
 # =============================================================================
 
 if __name__ == '__main__':
-    # Simple test
-    print('O3DE Simulator Module')
-    print('This module provides O3DESimulator for VLN evaluation')
-    print('')
-    print('Usage:')
-    print('  from o3de_simulator import O3DESimulator, Episode')
-    print('  sim = O3DESimulator()')
-    print('  obs = sim.reset(episode)')
-    print('  obs, reward, done, info = sim.step(action)')
-    print('  sim.close()')
+    import cv2
+    from datetime import datetime
+
+    print('SensorSubscriber - Capturing and saving images...')
+    print('Make sure O3DE is running and publishing to /rgb and /depth topics')
+
+    try:
+        # Initialize ROS2
+        rclpy.init()
+
+        # Create SensorSubscriber
+        sensor_sub = SensorSubscriber()
+
+        print('Waiting for sensor data...')
+        obs = sensor_sub.get_observation()
+
+        # Generate timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+
+        # Save images
+        rgb_path = f'rgb_{timestamp}.png'
+        depth_path = f'depth_{timestamp}.png'
+
+        cv2.imwrite(rgb_path, obs['rgb'])
+        cv2.imwrite(depth_path, obs['depth'])
+
+        print(f'RGB saved to: {rgb_path}')
+        print(f'Depth saved to: {depth_path}')
+
+        # Cleanup
+        sensor_sub.destroy_node()
+        rclpy.shutdown()
+
+    except Exception as e:
+        print(f'Error: {e}')
+        import traceback
+        traceback.print_exc()
