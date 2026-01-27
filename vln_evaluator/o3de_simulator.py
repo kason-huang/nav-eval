@@ -198,7 +198,15 @@ class SensorSubscriber:
     def _depth_callback(self, msg: Image):
         """Depth image callback"""
         try:
-            self.latest_depth = self.bridge.imgmsg_to_cv2(msg, '16UC1')
+            # 关键：将 ROS 消息转换为 32FC1 的 numpy 数组
+            # 32FC1 意味着每个像素是一个 32 位浮点数，代表距离（单位：米）
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='32FC1')
+            
+            # 预处理：处理无效值 (O3DE 可能会返回 NaN 或 Inf)
+            # 建议将 NaN 设为 0 或 最大量程，方便选手处理
+            cv_image = np.nan_to_num(cv_image, nan=0.0, posinf=10.0, neginf=0.0)
+            
+            self.latest_depth = cv_image
             self._depth_updated = True
         except Exception as e:
             self.node.get_logger().warning(f'Failed to convert Depth: {e}')
@@ -652,7 +660,9 @@ if __name__ == '__main__':
         depth_path = f'depth_{timestamp}.png'
 
         cv2.imwrite(rgb_path, obs['rgb'])
-        cv2.imwrite(depth_path, obs['depth'])
+        depth_255 = (obs['depth'] / 10 * 255).astype(np.uint8) 
+        color_map_image = cv2.applyColorMap(depth_255, cv2.COLORMAP_JET)
+        cv2.imwrite(depth_path, color_map_image)
 
         print(f'RGB saved to: {rgb_path}')
         print(f'Depth saved to: {depth_path}')

@@ -34,7 +34,7 @@ class VLNActionExecutor(Node):
         # 参数
         self.LINEAR_SPEED = 0.1
         self.ANGULAR_SPEED = 0.3
-        self.COLLISION_THRESHOLD = 0.3
+        self.COLLISION_THRESHOLD = 0.2
 
     def odom_callback(self, msg):
         """
@@ -67,21 +67,29 @@ class VLNActionExecutor(Node):
             return
             
         num_points = len(ranges)
-        mid = num_points // 2
-        start_idx = max(0, mid - 30)
-        end_idx = min(num_points, mid + 30)
-        front_view = ranges[start_idx:end_idx]
+        
+        # 设定检测点数。为了安全，window 不应超过总点数的一半
+        # 否则 ranges[:window] 和 ranges[-window:] 会在后方重叠
+        requested_window = 30 
+        window = min(requested_window, num_points // 2)
+
+        # Python 的切片操作即使 window > len(ranges) 也不会报错（会取到头）
+        # 但显式限制 window 可以保证逻辑语义准确
+        front_view = list(ranges[:window]) + list(ranges[-window:])
         
         valid_ranges = [
             r for r in front_view 
             if msg.range_min < r < msg.range_max
         ]
         
-        if valid_ranges and min(valid_ranges) < self.COLLISION_THRESHOLD:
-            if self.is_running and not self.collision_detected:
-                self.collision_detected = True
-                self.collision_count += 1
-                self.get_logger().error(f"！！！检测到碰撞停止！！！ 总次数: {self.collision_count}")
+        if valid_ranges:
+            current_min = min(valid_ranges)
+            if current_min < self.COLLISION_THRESHOLD:
+                # 只有在任务运行中且尚未标记碰撞时才触发
+                if self.is_running and not self.collision_detected:
+                    self.collision_detected = True
+                    self.collision_count += 1
+                    print(f"！！！检测到碰撞停止！！！ 总次数: {self.collision_count}")
 
     def get_yaw(self):
         if self.curr_pose is None:
