@@ -476,6 +476,10 @@ class O3DESimulator:
         self.success_threshold = success_threshold
         self.collision_threshold = collision_threshold
 
+        # Store initialization parameters for re-creating instances
+        self._linear_speed = linear_speed
+        self._angular_speed = angular_speed
+
         # Initialize O3DE Agent Manager
         self.o3de_manager = O3DEAgentManager(mode=mode)
 
@@ -510,6 +514,10 @@ class O3DESimulator:
         self.goal_position = episode.goal_position
         self.trajectory = []
 
+        # Re-initialize action_executor and sensor_sub to reset their ROS2 node states
+        # This ensures clean state for each episode, preventing message queue carryover
+        self._reinit_ros_components()
+
         # Load scene if config path provided
         if episode.scene_config_path:
             self.o3de_manager.create_scene(episode.scene_config_path)
@@ -539,6 +547,27 @@ class O3DESimulator:
             self.trajectory.append(pos)
 
         return obs
+
+    def _reinit_ros_components(self):
+        """
+        Re-initialize ROS2 components (action_executor and sensor_sub)
+
+        This is called at the start of each episode to ensure clean state.
+        Destroys old ROS2 nodes and creates new instances.
+        """
+        # Destroy old ROS2 nodes to prevent resource leaks
+        if hasattr(self, 'sensor_sub') and hasattr(self.sensor_sub, 'node'):
+            self.sensor_sub.node.destroy_node()
+
+        # Note: action_executor.node (VLNActionExecutor) is managed by the executor,
+        # we'll let Python garbage collection handle it since we're replacing the wrapper
+
+        # Create new instances with clean state
+        self.action_executor = ActionExecutorWrapper(
+            linear_speed=self._linear_speed,
+            angular_speed=self._angular_speed
+        )
+        self.sensor_sub = SensorSubscriber()
 
     def step(self, action: int) -> Tuple[Dict[str, np.ndarray], float, bool, Dict[str, Any]]:
         """
