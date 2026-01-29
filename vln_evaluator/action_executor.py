@@ -9,43 +9,141 @@ from sensor_msgs.msg import LaserScan
 import math
 import time
 
+# 可选依赖：Contact Sensor 支持
+try:
+    from gazebo_msgs.msg import ContactsState
+    CONTACT_SENSOR_AVAILABLE = True
+except ImportError:
+    CONTACT_SENSOR_AVAILABLE = False
+    ContactsState = None
+
 
 class VLNActionExecutor(Node):
-    def __init__(self):
+    def __init__(self, collision_method: str = "auto"):
+        """
+        Args:
+            collision_method: 碰撞检测方式
+                - "contact": 优先使用 Contact Sensor (推荐)
+                - "scan": 使用 LaserScan
+                - "auto": 自动检测 (优先 Contact Sensor，降级到 LaserScan)
+                - "both": 同时使用两种方式 (任一触发即停止)
+        """
         super().__init__('vln_action_executor')
-        
+
+        # === 碰撞检测方式配置 ===
+        self.collision_method = collision_method.lower()
+        self._init_collision_detection()
+
         # === QoS: 与 O3DE 的 SENSOR_DATA 兼容 ===
         sensor_qos = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
             durability=QoSDurabilityPolicy.VOLATILE,
             depth=10
         )
-        
+
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, sensor_qos)
-        self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, sensor_qos)
-        
+
+        # === 传感器订阅器 ===
+        self._init_sensor_subscriptions(sensor_qos)
+
         # 状态变量
         self.curr_pose = None
         self.collision_detected = False
         self.collision_count = 0
         self.is_running = False
-        
+        self.last_collision_source = None  # 记录碰撞来源：'contact' 或 'scan'
+
         # 参数
         self.LINEAR_SPEED = 0.1
         self.ANGULAR_SPEED = 0.3
         self.COLLISION_THRESHOLD = 0.2
 
+        self._log_collision_config()
+
+    def _init_collision_detection(self):
+        """初始化碰撞检测配置"""
+        # 检测 Contact Sensor 可用性
+        self.use_contact_sensor = CONTACT_SENSOR_AVAILABLE
+        self.use_laser_scan = True
+
+        if self.collision_method == "contact":
+            if not CONTACT_SENSOR_AVAILABLE:
+                self.get_logger().warn(
+                    "Contact Sensor 被请求但不可用 (gazebo_msgs 未安装)，降级到 LaserScan"
+                )
+                self.use_contact_sensor = False
+            self.use_laser_scan = False
+        elif self.collision_method == "scan":
+            self.use_contact_sensor = False
+        elif self.collision_method == "both":
+            if not CONTACT_SENSOR_AVAILABLE:
+                self.get_logger().warn("Contact Sensor 不可用，仅使用 LaserScan")
+                self.use_contact_sensor = False
+        elif self.collision_method == "auto":
+            # 自动检测：优先 Contact Sensor
+            if not CONTACT_SENSOR_AVAILABLE:
+                self.get_logger().info("Contact Sensor 不可用，使用 LaserScan")
+                self.use_contact_sensor = False
+        else:
+            self.get_logger().warn(
+                f"未知的 collision_method: {self.collision_method}，使用 auto 模式"
+            )
+            self.collision_method = "auto"
+            self._init_collision_detection()
+
+    def _init_sensor_subscriptions(self, sensor_qos):
+        """初始化传感器订阅器"""
+        # Contact Sensor 订阅
+        if self.use_contact_sensor:
+            self.contact_sub = self.create_subscription(
+                ContactsState,
+                '/contact_sensor',
+                self.contact_callback,
+                sensor_qos
+            )
+            self.get_logger().info("✓ 已订阅 Contact Sensor (/contact_sensor)")
+
+        # LaserScan 订阅
+        if self.use_laser_scan:
+            self.scan_sub = self.create_subscription(
+                LaserScan,
+                '/scan',
+                self.scan_callback,
+                sensor_qos
+            )
+            self.get_logger().info("✓ 已订阅 LaserScan (/scan)")
+
+    def _log_collision_config(self):
+        """输出碰撞检测配置"""
+        methods = []
+        if self.use_contact_sensor:
+            methods.append("Contact Sensor")
+        if self.use_laser_scan:
+            methods.append("LaserScan")
+
+        mode_str = f"模式: {self.collision_method.upper()}"
+        methods_str = " + ".join(methods) if methods else "无"
+
+        print(f"\n{'='*60}")
+        print(f"🔧 碰撞检测配置")
+        print(f"{'='*60}")
+        print(f"  {mode_str}")
+        print(f"  使用方式: {methods_str}")
+        print(f"{'='*60}\n")
+
+        self.get_logger().info(f"碰撞检测模式: {self.collision_method}, 方式: {methods_str}")
+
     def odom_callback(self, msg):
         """
-        只接受“有效”的 odom 消息：
+        只接受"有效"的 odom 消息：
         - 时间戳 sec != 0（排除初始化零帧）
         - 或位置明显非零（双重保险）
         """
         header = msg.header
         pose = msg.pose.pose
         pos = pose.position
-        
+
         # 判断是否为有效时间戳（O3DE 物理启动后 stamp.sec > 0）
         if header.stamp.sec == 0:
             # 若时间戳无效，再检查是否是全零位姿（初始默认值）
@@ -57,31 +155,59 @@ class VLNActionExecutor(Node):
             )
             if is_zero_pose:
                 return  # 忽略初始零帧
-        
+
         # 接受有效数据
         self.curr_pose = pose
 
+    def contact_callback(self, msg: ContactsState):
+        """
+        Contact Sensor 碰撞回调
+
+        核心逻辑：只要 states 数组非空，就表示发生了物理碰撞
+        """
+        # 只在任务运行中且尚未标记碰撞时才触发
+        if self.is_running and not self.collision_detected:
+            # 判断是否有碰撞（states 非空）
+            if len(msg.states) > 0:
+                self.collision_detected = True
+                self.collision_count += 1
+                self.last_collision_source = "contact"
+
+                # 提取第一个碰撞的详细信息
+                state = msg.states[0]
+                collision_info = (
+                    f"{state.collision1_name.split('Name:')[-1].strip()} ⟷ "
+                    f"{state.collision2_name.split('Name:')[-1].strip()}"
+                )
+
+                print(f"！！！检测到碰撞 (Contact Sensor)！！！")
+                print(f"   碰撞对象: {collision_info}")
+                print(f"   接触点数: {len(state.contact_positions)}")
+                print(f"   总次数: {self.collision_count}")
+                print(f"{'='*60}")
+
     def scan_callback(self, msg):
+        """LaserScan 碰撞回调"""
         ranges = msg.ranges
         if not ranges:
             return
-            
+
         num_points = len(ranges)
-        
+
         # 设定检测点数。为了安全，window 不应超过总点数的一半
         # 否则 ranges[:window] 和 ranges[-window:] 会在后方重叠
-        requested_window = 30 
+        requested_window = 30
         window = min(requested_window, num_points // 2)
 
         # Python 的切片操作即使 window > len(ranges) 也不会报错（会取到头）
         # 但显式限制 window 可以保证逻辑语义准确
         front_view = list(ranges[:window]) + list(ranges[-window:])
-        
+
         valid_ranges = [
-            r for r in front_view 
+            r for r in front_view
             if msg.range_min < r < msg.range_max
         ]
-        
+
         if valid_ranges:
             current_min = min(valid_ranges)
             if current_min < self.COLLISION_THRESHOLD:
@@ -89,7 +215,11 @@ class VLNActionExecutor(Node):
                 if self.is_running and not self.collision_detected:
                     self.collision_detected = True
                     self.collision_count += 1
-                    print(f"！！！检测到碰撞停止！！！ 总次数: {self.collision_count}")
+                    self.last_collision_source = "scan"
+                    print(f"！！！检测到碰撞 (LaserScan)！！！")
+                    print(f"   最小距离: {current_min:.3f}m")
+                    print(f"   总次数: {self.collision_count}")
+                    print(f"{'='*60}")
 
     def get_yaw(self):
         if self.curr_pose is None:
@@ -184,9 +314,24 @@ class VLNActionExecutor(Node):
 
 
 def main():
+    import argparse
+
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(
+        description='VLN 动作执行器 - 支持 Contact Sensor 和 LaserScan 碰撞检测'
+    )
+    parser.add_argument(
+        '--collision-method',
+        type=str,
+        default='auto',
+        choices=['auto', 'contact', 'scan', 'both'],
+        help='碰撞检测方式: auto(自动检测), contact(Contact Sensor优先), scan(LaserScan), both(同时使用)'
+    )
+    args = parser.parse_args()
+
     rclpy.init()
-    node = VLNActionExecutor()
-    
+    node = VLNActionExecutor(collision_method=args.collision_method)
+
     print("\n" + "="*50)
     print("🚀 VLN 动作执行器（O3DE 仿真专用 - 已修复 odom 问题）")
     print("="*50)
